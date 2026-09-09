@@ -248,16 +248,14 @@ def download(bid: str, path: str):
             with s.lock:
                 f = s.client.open(path, "rb")
                 try:
-                    # 提速：SFTP 预取。先显式 stat 拿 size（避免部分服务器 stat hangs），
-                    # 再让后台线程并发抓取数据块（多块在飞行，消除串行 RTT）。
-                    try:
-                        size = f.stat().st_size
-                    except Exception:
-                        size = None
-                    try:
-                        f.prefetch(file_size=size, max_concurrent_requests=16)
-                    except Exception:
-                        pass  # 预取失败则退回串行读
+                    # 预取(opt-in)：CYBERCAT_PREFETCH=1 才启用，仅适合高延迟公网。
+                    # 本地/局域网默认关（串行更快），且避免对远程服务器并发放大负载。
+                    if config.PREFETCH:
+                        try:
+                            size = f.stat().st_size
+                            f.prefetch(file_size=size, max_concurrent_requests=config.PREFETCH_CONCURRENCY)
+                        except Exception:
+                            pass  # 预取失败则退回串行读
                     while chunk := f.read(256 * 1024):
                         yield chunk
                 finally:
