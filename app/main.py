@@ -52,14 +52,38 @@ def _connect(bookmark):
             hostname=host, port=port, username=user,
             password=pwd, timeout=10, allow_agent=True, look_for_keys=False,
         )
+    # SSH 保活：每 30s 发 keepalive，防止服务器/网络设备因空闲断连
+    try:
+        client.get_transport().set_keepalive(30)
+    except Exception:
+        pass
     return client.open_sftp()
 
 
+def _session_alive(s):
+    """判断 SFTP 会话底层 transport 是否仍活跃（未断连）。"""
+    try:
+        ch = s.client.get_channel()
+        if ch is None:
+            return False
+        t = ch.get_transport()
+        if t is None:
+            return False
+        return bool(t.is_active())
+    except Exception:
+        return False
+
+
 def _get_session(bid):
+    """取会话；若底层连接已死，则自动断开并重建（刷新/操作时热重连）。"""
     bm = bookmarks.get_bookmark(bid)
     if not bm:
         raise HTTPException(404, "书签不存在")
-    return pool.get_session(bid, connect_cb=lambda _: _connect(bm))
+    s = pool.get_session(bid, connect_cb=lambda _: _connect(bm))
+    if not _session_alive(s):
+        pool.dispose(bid)
+        s = pool.get_session(bid, connect_cb=lambda _: _connect(bm))
+    return s
 
 
 # ---------- 静态托管 ----------
@@ -153,9 +177,20 @@ def list_files(bid: str, path: str = Query("/"), limit: int = Query(config.DEFAU
         raise HTTPException(401, "认证失败")
     except FileNotFoundError:
         raise HTTPException(404, "路径不存在")
-    except paramiko.SSHException as e:
+    except (paramiko.SSHException, EOFError, OSError) as e:
+        # 连接中断：丢弃旧会话，重新连接重试一次（热重连）
         pool.dispose(bid)
-        raise HTTPException(500, f"连接中断: {e}")
+        try:
+            s = _get_session(bid)
+            return sfops.list_dir(s, path, limit=limit)
+        except paramiko.AuthenticationException:
+            pool.dispose(bid)
+            raise HTTPException(401, "认证失败")
+        except FileNotFoundError:
+            raise HTTPException(404, "路径不存在")
+        except Exception as e2:
+            pool.dispose(bid)
+            raise HTTPException(500, f"连接中断且重连失败: {e2}")
 
 
 @app.post("/api/bookmarks/{bid}/mkdir")
