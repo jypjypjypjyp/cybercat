@@ -167,22 +167,33 @@ def test_bookmark(bid: str):
 
 
 # ---------- 文件操作 ----------
-@app.get("/api/bookmarks/{bid}/list")
-def list_files(bid: str, path: str = Query("/"), limit: int = Query(config.DEFAULT_PAGE_SIZE)):
+def _is_disconnect(e):
+    """判断异常是否为连接中断（可重试）。"""
+    return isinstance(e, (paramiko.SSHException, EOFError, OSError))
+
+
+def _with_reconnect(bid, fn, error_prefix):
+    """执行 fn(session)；若连接中断则 dispose + 重建 + 重试一次。
+
+    fn 抛出的非断连异常（认证/路径不存在/其他）会被正确映射或原样冒泡。
+    download/upload 是流式端点，不适用本 helper（见其独立实现）。
+    """
     try:
         s = _get_session(bid)
-        return sfops.list_dir(s, path, limit=limit)
+        return fn(s)
     except paramiko.AuthenticationException:
         pool.dispose(bid)
         raise HTTPException(401, "认证失败")
     except FileNotFoundError:
         raise HTTPException(404, "路径不存在")
-    except (paramiko.SSHException, EOFError, OSError) as e:
-        # 连接中断：丢弃旧会话，重新连接重试一次（热重连）
+    except Exception as e:
+        if not _is_disconnect(e):
+            raise
+        # 连接中断：丢弃旧会话，重建重试一次
         pool.dispose(bid)
         try:
             s = _get_session(bid)
-            return sfops.list_dir(s, path, limit=limit)
+            return fn(s)
         except paramiko.AuthenticationException:
             pool.dispose(bid)
             raise HTTPException(401, "认证失败")
@@ -190,18 +201,20 @@ def list_files(bid: str, path: str = Query("/"), limit: int = Query(config.DEFAU
             raise HTTPException(404, "路径不存在")
         except Exception as e2:
             pool.dispose(bid)
-            raise HTTPException(500, f"连接中断且重连失败: {e2}")
+            raise HTTPException(500, f"{error_prefix}: 连接中断且重连失败: {e2}")
+
+
+@app.get("/api/bookmarks/{bid}/list")
+def list_files(bid: str, path: str = Query("/"), limit: int = Query(config.DEFAULT_PAGE_SIZE)):
+    return _with_reconnect(bid, lambda s: sfops.list_dir(s, path, limit=limit), "列表")
 
 
 @app.post("/api/bookmarks/{bid}/mkdir")
 def mkdir(bid: str, path: str):
     try:
-        s = _get_session(bid)
-        sfops.mkdir(s, path)
-        return {"ok": True}
-    except paramiko.SSHException as e:
-        pool.dispose(bid)
-        raise HTTPException(500, f"连接中断: {e}")
+        return _with_reconnect(bid, lambda s: sfops.mkdir(s, path), "新建目录")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"新建目录失败: {e}")
 
@@ -209,12 +222,9 @@ def mkdir(bid: str, path: str):
 @app.post("/api/bookmarks/{bid}/rename")
 def rename(bid: str, old: str, new: str):
     try:
-        s = _get_session(bid)
-        sfops.rename(s, old, new)
-        return {"ok": True}
-    except paramiko.SSHException as e:
-        pool.dispose(bid)
-        raise HTTPException(500, f"连接中断: {e}")
+        return _with_reconnect(bid, lambda s: sfops.rename(s, old, new), "重命名")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"重命名失败: {e}")
 
@@ -222,12 +232,9 @@ def rename(bid: str, old: str, new: str):
 @app.post("/api/bookmarks/{bid}/delete")
 def delete(bid: str, path: str):
     try:
-        s = _get_session(bid)
-        sfops.delete(s, path)
-        return {"ok": True}
-    except paramiko.SSHException as e:
-        pool.dispose(bid)
-        raise HTTPException(500, f"连接中断: {e}")
+        return _with_reconnect(bid, lambda s: sfops.delete(s, path), "删除")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"删除失败: {e}")
 
@@ -285,3 +292,12 @@ def connect(bid: str):
     except Exception as e:
         pool.dispose(bid)
         raise HTTPException(500, f"连接失败: {e}")
+
+
+# SPA 回退：前端路由 /{hostname}/{path} 返回 index.html 交给前端 JS 接管。
+# 必须放在最后，避免抢占 /api/* 与 /static/*（它们已由更早注册的路由匹配）。
+@app.get("/{full_path:path}")
+def spa_fallback(full_path: str):
+    if full_path.startswith("api"):
+        raise HTTPException(404, "Not Found")
+    return FileResponse(STATIC_DIR / "index.html")

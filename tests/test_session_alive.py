@@ -1,5 +1,7 @@
 from unittest import mock
 
+import paramiko
+
 import app.main as m
 import app.session_pool as sp
 
@@ -64,3 +66,60 @@ def test_get_session_reuses_alive(monkeypatch):
     pool._sessions["b1"] = sp.SFTPSession(alive)
     got = m._get_session("b1")
     assert got.client is alive  # 复用，未重建
+
+
+def test_with_reconnect_retries_once_on_disconnect(monkeypatch):
+    """_with_reconnect：第一次 fn 抛断连异常，dispose 重建后重试一次成功。"""
+    pool = sp.SessionPool()
+    monkeypatch.setattr(m, "pool", pool)
+    bm = {"id": "b1", "host": "h", "port": 22, "username": "u",
+          "auth_method": "key", "key_path": "~/.ssh/x"}
+    monkeypatch.setattr(m.bookmarks, "get_bookmark", lambda bid: bm)
+    monkeypatch.setattr(m, "_connect", lambda bm: _sftp_with_transport(True))
+
+    calls = {"n": 0}
+    def fn(s):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("Socket is closed")  # 首次模拟断连
+        return mk_ret  # 第二次成功
+    mk_ret = "ok"
+    # 首次 get_session 时 _connect 返回活连接，但 fn 人为抛断连 → 应重试
+    r = m._with_reconnect("b1", fn, "操作")
+    assert r == "ok"
+    assert calls["n"] == 2
+    assert "b1" in pool._sessions
+
+
+def test_with_reconnect_propagates_auth(monkeypatch):
+    """_with_reconnect：认证异常 → 401，不重试。"""
+    pool = sp.SessionPool()
+    monkeypatch.setattr(m, "pool", pool)
+    bm = {"id": "b1", "host": "h", "port": 22, "username": "u",
+          "auth_method": "key", "key_path": "~/.ssh/x"}
+    monkeypatch.setattr(m.bookmarks, "get_bookmark", lambda bid: bm)
+    monkeypatch.setattr(m, "_connect", lambda bm: _sftp_with_transport(True))
+
+    def fn(s):
+        raise paramiko.AuthenticationException("bad auth")
+    import pytest
+    with pytest.raises(Exception) as ei:
+        m._with_reconnect("b1", fn, "操作")
+    assert ei.value.status_code == 401
+
+
+def test_with_reconnect_propagates_notfound(monkeypatch):
+    """_with_reconnect：FileNotFoundError → 404，不重试。"""
+    pool = sp.SessionPool()
+    monkeypatch.setattr(m, "pool", pool)
+    bm = {"id": "b1", "host": "h", "port": 22, "username": "u",
+          "auth_method": "key", "key_path": "~/.ssh/x"}
+    monkeypatch.setattr(m.bookmarks, "get_bookmark", lambda bid: bm)
+    monkeypatch.setattr(m, "_connect", lambda bm: _sftp_with_transport(True))
+
+    def fn(s):
+        raise FileNotFoundError("no path")
+    import pytest
+    with pytest.raises(Exception) as ei:
+        m._with_reconnect("b1", fn, "操作")
+    assert ei.value.status_code == 404

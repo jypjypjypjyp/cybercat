@@ -293,6 +293,8 @@
       acc += "/" + c;
       crumbHtml += `<span class="crumb sep">›</span><span class="crumb" onclick='SFPM.goto("${escapeAttrSingle(acc)}")'>${escapeHtml(c)}</span>`;
     });
+    // 路径直接输入入口（点击弹输入框，回车跳转）
+    crumbHtml += `<span class="crumb sep">›</span><span class="crumb path-input" title="输入路径跳转" onclick="SFPM.editPath()">✎ 输入路径</span>`;
 
     const toolbar = `
       <div class="browser-toolbar">
@@ -373,7 +375,9 @@
   }
 
   function goto(path) {
-    state.path = path; state.selected = null; loadDir();
+    state.path = path; state.selected = null;
+    loadDir();
+    syncUrl();
   }
 
   function goUp() {
@@ -385,6 +389,58 @@
   function loadMore() { loadDir(true); }
 
   function openDir(path) { goto(path); }
+
+  function editPath() {
+    const p = prompt("输入要跳转的路径:", state.path || "/");
+    if (p === null) return;
+    const norm = p.startsWith("/") ? p : "/" + p;
+    if (norm === state.path) return;
+    state.path = norm;
+    loadDir();
+    // 同步 URL
+    syncUrl();
+  }
+
+  // ---------- URL 路由：http://127.0.0.1:9000/{hostkey}/{path} ----------
+  function hostKeyOf(bm) {
+    // 用书签名作为 URL 段的 key（优先 name，其次 host）
+    return encodeURIComponent(bm.name || bm.host);
+  }
+
+  function syncUrl() {
+    // 更新地址栏为 /{host}/{path}，支持直接访问/分享深链接
+    if (!state.current) return;
+    const hostKey = hostKeyOf(state.current);
+    const path = (state.path || "/").replace(/^\/+/, "").replace(/\/+$/, "");
+    const newUrl = `/${hostKey}` + (path ? "/" + path : "");
+    history.replaceState(null, "", newUrl);
+  }
+
+  function findBookmarkByKey(key) {
+    const k = decodeURIComponent(key).toLowerCase();
+    return state.bookmarks.find(b => (b.name || "").toLowerCase() === k || (b.host || "").toLowerCase() === k) || null;
+  }
+
+  async function parseUrlOnLoad() {
+    // location.pathname 形如 /{host}/{path...}
+    const parts = location.pathname.split("/").filter(Boolean);
+    if (parts.length < 1) return;
+    if (!state.bookmarks.length) await loadBookmarks();
+    const hostKey = parts[0];
+    const sub = parts.slice(1).join("/");
+    const bm = findBookmarkByKey(hostKey);
+    if (!bm) return; // 找不到主机，留在书签页
+    // 先连接（复用会话），再进入浏览器并 goto 到对应路径
+    try {
+      await api("POST", `/api/bookmarks/${bm.id}/connect`);
+      showBrowser(bm);
+      state.path = "/" + sub;
+      loadDir();
+      syncUrl();
+    } catch (e) {
+      toast(e.message, "err");
+    }
+  }
 
 
   async function newDir() {
@@ -562,7 +618,7 @@
   // ---------- 启动 ----------
   window.SFPM = {
     showBooks, connect, openBookForm, saveBook, delBook, testBook, syncSsh,
-    goto, goUp, loadMore, openDir, newDir, uploadFile, downloadOne, renameItem, deleteItem, back,
+    goto, goUp, loadMore, openDir, editPath, newDir, uploadFile, downloadOne, renameItem, deleteItem, back,
     setSort, toggleSortDir, toggleCheck, toggleCheckAll, batchDelete, batchDownload,
     toggleTheme,
     closeModal,
@@ -570,5 +626,5 @@
   bind();
   initScale();
   initTheme();
-  loadBookmarks();
+  loadBookmarks().then(() => parseUrlOnLoad());
 })();
