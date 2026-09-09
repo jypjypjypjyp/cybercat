@@ -155,3 +155,10 @@ uvicorn  0.52.4
 4. 缩放滑杆/快捷键生效且刷新后保持。
 5. 大目录列表分页流畅，不卡住其他请求（验证事件循环未被阻塞）。
 6. 依赖仅 paramiko/fastapi/uvicorn；前端零 npm 依赖。
+
+## 11. ~/.ssh/config 同步（追加功能）
+
+- 解析 `~/.ssh/config`（跳过通配 `Host *`），映射为书签：name=Host别名, host=HostName, port, username=User, auth_method=key(有 IdentityFile), key_path=IdentityFile。
+- **匹配键（已确认）：按 Host 别名匹配书签 name**——存在则覆盖 host/port/username/auth_method/key_path（保留 id 与钥匙串密码），没有则新建。
+- 同步不改动钥匙串密码。
+- API：`POST /api/sync-ssh-config`，返回 `{ok, created, updated, skipped}`。
