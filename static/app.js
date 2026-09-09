@@ -86,10 +86,10 @@
     renderBooks();
   }
 
-  function showBrowser(bm) {
+  function showBrowser(bm, initialPath) {
     state.view = "browser";
     state.current = bm;
-    state.path = bm.default_path || "/";
+    state.path = initialPath || bm.default_path || "/";
     state.entries = [];
     state.selected = null;
     $("#view-books").classList.add("hidden");
@@ -433,9 +433,7 @@
     // 先连接（复用会话），再进入浏览器并 goto 到对应路径
     try {
       await api("POST", `/api/bookmarks/${bm.id}/connect`);
-      showBrowser(bm);
-      state.path = "/" + sub;
-      loadDir();
+      showBrowser(bm, "/" + sub);
       syncUrl();
     } catch (e) {
       toast(e.message, "err");
