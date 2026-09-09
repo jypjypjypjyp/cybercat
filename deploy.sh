@@ -1,9 +1,10 @@
 #!/bin/zsh
 # deploy.sh — 一次性部署/更新 Cyber Cat (SFTP Manager)
-# 1. uv 建 .venv + 安装依赖
-# 2. (可选) 跑测试
-# 3. 注册 cybercat 命令到 ~/.local/bin
-# 4. 验证可用
+# 依赖声明仅在 pyproject.toml（dependencies + dependency-groups.dev），
+# 本脚本用 `uv sync` 读取它同步 .venv，避免版本漂移。
+# 1. uv sync 建 .venv + 同步依赖（运行时 + dev group）
+# 2. 注册 cybercat 命令到 ~/.local/bin
+# 3. 验证可用；`--test` 可选跑测试
 set -e
 
 # 项目根 = 脚本所在目录（支持项目移动/改名）
@@ -15,19 +16,12 @@ PY="${PROJECT_DIR}/.venv/bin/python"
 echo "== Cyber Cat deploy =="
 echo "项目目录: ${PROJECT_DIR}"
 
-# 1. 建 venv + 装依赖
-if [ ! -x "$PY" ]; then
-  echo "[1/4] 创建 uv 虚拟环境 (.venv)..."
-  (cd "$PROJECT_DIR" && uv venv --python 3.12)
-else
-  echo "[1/4] .venv 已存在，跳过"
-fi
+# 1. 用 uv sync 按 pyproject.toml 建 venv + 同步依赖（运行时 + dev group，单一来源）
+echo "[1/2] uv sync（按 pyproject.toml 同步 .venv，含 dev group）..."
+(cd "$PROJECT_DIR" && uv sync)
 
-echo "[2/4] 安装依赖 (paramiko / fastapi / uvicorn / python-multipart / pytest)..."
-(cd "$PROJECT_DIR" && uv pip install 'paramiko>=5.0.0' 'fastapi>=0.140.0' 'uvicorn>=0.50.0' 'python-multipart>=0.0.9' 'pytest>=8.0.0' 'httpx>=0.27.0')
-
-# 3. 注册 cybercat 命令
-echo "[3/4] 注册 cybercat 命令 -> ${WRAPPER}"
+# 2. 注册 cybercat 命令
+echo "[2/2] 注册 cybercat 命令 -> ${WRAPPER}"
 mkdir -p "$PREFIX"
 cat > "$WRAPPER" <<EOF
 #!/bin/zsh
@@ -42,8 +36,8 @@ exec "\$PY" "\$PROJECT_DIR/scripts/cybercat.py" "\$@"
 EOF
 chmod +x "$WRAPPER"
 
-# 4. 验证
-echo "[4/4] 验证 cybercat ..."
+# 3. 验证
+echo ">> 验证 cybercat ..."
 if command -v cybercat >/dev/null 2>&1; then
   echo "✅ cybercat 位于: $(command -v cybercat)"
   echo "   运行: cybercat   → 启动 http://127.0.0.1:9000"
