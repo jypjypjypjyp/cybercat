@@ -386,11 +386,6 @@
 
   function openDir(path) { goto(path); }
 
-  function selectRow(row) {
-    $$(".file-row").forEach((r) => r.classList.remove("selected"));
-    row.classList.add("selected");
-    state.selected = row.dataset.path;
-  }
 
   async function newDir() {
     const p = prompt("目录名（相对当前目录）:", "新建目录");
@@ -567,7 +562,7 @@
   // ---------- 启动 ----------
   window.SFPM = {
     showBooks, connect, openBookForm, saveBook, delBook, testBook, syncSsh,
-    goto, goUp, loadMore, openDir, selectRow, newDir, uploadFile, downloadOne, renameItem, deleteItem, back,
+    goto, goUp, loadMore, openDir, newDir, uploadFile, downloadOne, renameItem, deleteItem, back,
     setSort, toggleSortDir, toggleCheck, toggleCheckAll, batchDelete, batchDownload,
     toggleTheme,
     closeModal,
