@@ -107,24 +107,33 @@
     const v = $("#view-books");
     const header = `
       <div class="books-header">
-        <div class="books-title">我的书签</div>
-        <div style="display:flex;gap:8px">
-          <button class="btn" onclick="SFPM.syncSsh()">⤓ 同步 SSH 配置</button>
+        <div class="books-title">我的书签<small>从 SSH 配置同步 · 或手动新建</small></div>
+        <div class="books-tools">
+          <button class="btn outline" onclick="SFPM.syncSsh()">⤓ 同步 SSH 配置</button>
           <button class="btn primary" onclick="SFPM.openBookForm()">+ 新建书签</button>
         </div>
       </div>`;
     let grid;
     if (state.bookmarks.length === 0) {
-      grid = `<div class="empty-state">还没有书签，点「新建书签」开始。</div>`;
+      grid = `<div class="empty-state">
+        <div class="glyph">⛁</div>
+        <div style="font-weight:600;font-size:calc(16px * var(--ui-scale))">还没有书签</div>
+        <div style="font-size:calc(13px * var(--ui-scale))">点「新建书签」手动添加，或「同步 SSH 配置」从 ~/.ssh/config 导入</div>
+      </div>`;
     } else {
       grid = `<div class="book-grid">` + state.bookmarks.map((b) => `
         <div class="book-card">
-          <div class="book-name">${escapeHtml(b.name || b.host)}</div>
-          <div class="book-meta">${escapeHtml(b.username)}@${escapeHtml(b.host)}:${b.port}</div>
+          <div class="book-top">
+            <div class="book-avatar">${escapeHtml((b.name || b.host || "?").charAt(0).toUpperCase())}</div>
+            <div style="min-width:0">
+              <div class="book-name">${escapeHtml(b.name || b.host)}</div>
+              <div class="book-meta">${escapeHtml(b.username)}@${escapeHtml(b.host)}:${b.port}</div>
+            </div>
+          </div>
           <div class="book-actions">
             <button class="btn primary sm" onclick="SFPM.connect('${b.id}')">连接</button>
-            <button class="btn sm" onclick="SFPM.openBookForm('${b.id}')">编辑</button>
-            <button class="btn sm" onclick="SFPM.testBook('${b.id}')">测试</button>
+            <button class="btn ghost sm" onclick="SFPM.openBookForm('${b.id}')">编辑</button>
+            <button class="btn ghost sm" onclick="SFPM.testBook('${b.id}')">测试</button>
             <div class="spacer"></div>
             <button class="btn danger sm" onclick="SFPM.delBook('${b.id}')">删除</button>
           </div>
@@ -281,12 +290,11 @@
 
     const toolbar = `
       <div class="browser-toolbar">
-        <button class="btn sm" onclick="SFPM.goto('${escapeAttrSingle(state.path)}')" title="刷新">⟳ 刷新</button>
-        <button class="btn sm" onclick="SFPM.goUp()" title="上级">↑</button>
-        <button class="btn sm" onclick="SFPM.newDir()">+ 新建目录</button>
-        <button class="btn sm" onclick="SFPM.uploadFile()">↑ 上传</button>
-        <div class="spacer" style="flex:1"></div>
-        <span class="file-mtime" style="text-align:right">${state.total} 项</span>
+        <button class="btn outline sm" onclick="SFPM.goto('${escapeAttrSingle(state.path)}')" title="刷新">⟳ 刷新</button>
+        <button class="btn outline sm" onclick="SFPM.goUp()" title="上级">↑ 上级</button>
+        <button class="btn outline sm" onclick="SFPM.newDir()">+ 新建目录</button>
+        <button class="btn outline sm" onclick="SFPM.uploadFile()">↑ 上传</button>
+        <span class="count">${state.total} 项</span>
       </div>`;
 
     let listHtml;
@@ -308,7 +316,7 @@
     }
 
     const loadMore = state.hasMore
-      ? `<div class="load-more"><button class="btn" onclick="SFPM.loadMore()">加载更多…</button></div>`
+      ? `<div class="load-more"><button class="btn outline" onclick="SFPM.loadMore()">加载更多…</button></div>`
       : "";
 
     $("#view-browser").innerHTML = `
