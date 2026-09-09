@@ -250,6 +250,7 @@
       const bm = state.bookmarks.find((x) => x.id === id);
       await api("POST", `/api/bookmarks/${id}/connect`);
       showBrowser(bm);
+      toast("已连接", "ok");
     } catch (e) {
       toast(e.message, "err");
     }
