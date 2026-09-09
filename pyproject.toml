@@ -1,0 +1,20 @@
+[project]
+name = "sftp-manager"
+version = "0.1.0"
+description = "极简 SFTP 文件浏览器（macOS，webUI + Python）"
+requires-python = ">=3.10"
+dependencies = [
+    "paramiko>=5.0.0",
+    "fastapi>=0.140.0",
+    "uvicorn>=0.50.0",
+    "python-multipart>=0.0.9",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "httpx>=0.27.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

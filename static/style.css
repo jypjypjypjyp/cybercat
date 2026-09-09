@@ -1,0 +1,161 @@
+/* SFTP Manager —— 极简风格，所有尺寸基于 --ui-scale 缩放变量 */
+:root {
+  --ui-scale: 1;
+  --unit: calc(1px * var(--ui-scale));
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --border: #e3e6ea;
+  --text: #1d2229;
+  --muted: #6b7480;
+  --accent: #2f6fed;
+  --accent-soft: #eaf1ff;
+  --danger: #d64545;
+  --success: #2aa06c;
+  --radius: calc(10px * var(--ui-scale));
+  --radius-sm: calc(6px * var(--ui-scale));
+  --shadow: 0 1px 3px rgba(0,0,0,.06);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", Segoe UI, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: calc(14px * var(--ui-scale));
+  line-height: calc(1.6 * var(--ui-scale));
+}
+
+.app { display: flex; flex-direction: column; min-height: 100vh; }
+
+/* 顶部栏 */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: calc(8px * var(--ui-scale)) calc(16px * var(--ui-scale));
+  background: var(--panel); border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 10;
+}
+.topbar-left { display: flex; align-items: center; gap: calc(8px * var(--ui-scale)); }
+.logo { font-weight: 700; font-size: calc(16px * var(--ui-scale)); color: var(--accent); }
+.topbar-right { display: flex; align-items: center; gap: calc(6px * var(--ui-scale)); }
+
+.btn {
+  border: 1px solid var(--border); background: var(--panel); color: var(--text);
+  border-radius: var(--radius-sm); padding: calc(4px * var(--ui-scale)) calc(10px * var(--ui-scale));
+  font-size: calc(13px * var(--ui-scale)); cursor: pointer; transition: .1s;
+}
+.btn:hover { border-color: var(--accent); color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.btn.primary:hover { background: #2559c8; color: #fff; }
+.btn.danger { color: var(--danger); border-color: transparent; }
+.btn.danger:hover { background: #fdeeee; border-color: var(--danger); }
+.btn.ghost { border-color: transparent; background: transparent; }
+.btn.ghost:hover { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.btn.sm { padding: calc(2px * var(--ui-scale)) calc(7px * var(--ui-scale)); font-size: calc(12px * var(--ui-scale)); }
+.btn.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+
+/* 书签页 */
+#view-books { padding: calc(24px * var(--ui-scale)); }
+.books-header {
+  display: flex; align-items: center; justify-content: space-between;
+  max-width: 960px; margin: 0 auto calc(16px * var(--ui-scale));
+}
+.books-title { font-size: calc(22px * var(--ui-scale)); font-weight: 700; }
+.book-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(calc(280px * var(--ui-scale)), 1fr));
+  gap: calc(14px * var(--ui-scale)); max-width: 960px; margin: 0 auto;
+}
+.book-card {
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: calc(14px * var(--ui-scale)); box-shadow: var(--shadow); transition: .12s;
+}
+.book-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+.book-name { font-weight: 600; font-size: calc(15px * var(--ui-scale)); margin-bottom: calc(4px * var(--ui-scale)); }
+.book-meta { color: var(--muted); font-size: calc(12px * var(--ui-scale)); font-family: monospace; }
+.book-actions { display: flex; gap: calc(6px * var(--ui-scale)); margin-top: calc(12px * var(--ui-scale)); }
+.book-actions .spacer { flex: 1; }
+.empty-state {
+  text-align: center; color: var(--muted); padding: calc(60px * var(--ui-scale));
+  border: 1px dashed var(--border); border-radius: var(--radius); max-width: 960px; margin: 0 auto;
+}
+
+/* 文件浏览器 */
+#view-browser { display: flex; flex-direction: column; flex: 1; }
+.crumbs {
+  display: flex; flex-wrap: wrap; align-items: center; gap: calc(4px * var(--ui-scale));
+  padding: calc(8px * var(--ui-scale)) calc(16px * var(--ui-scale));
+  background: var(--panel); border-bottom: 1px solid var(--border);
+  font-size: calc(13px * var(--ui-scale));
+}
+.crumb { cursor: pointer; color: var(--accent); padding: calc(2px * var(--ui-scale)) calc(4px * var(--ui-scale)); border-radius: var(--radius-sm); }
+.crumb:hover { background: var(--accent-soft); }
+.crumb.sep { color: var(--muted); cursor: default; }
+.browser-toolbar {
+  display: flex; gap: calc(6px * var(--ui-scale)); padding: calc(8px * var(--ui-scale)) calc(16px * var(--ui-scale));
+  border-bottom: 1px solid var(--border); background: var(--panel); align-items: center;
+}
+.file-list { flex: 1; overflow-y: auto; }
+.file-row {
+  display: grid; grid-template-columns: calc(28px * var(--ui-scale)) 1fr auto auto auto;
+  gap: calc(10px * var(--ui-scale)); align-items: center;
+  padding: calc(6px * var(--ui-scale)) calc(16px * var(--ui-scale));
+  border-bottom: 1px solid var(--border); cursor: default;
+}
+.file-row:hover { background: var(--accent-soft); }
+.file-row.selected { background: var(--accent-soft); }
+.file-icon { font-size: calc(18px * var(--ui-scale)); text-align: center; }
+.file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-name.dir { cursor: pointer; color: var(--accent); }
+.file-size { color: var(--muted); font-size: calc(12px * var(--ui-scale)); width: calc(90px * var(--ui-scale)); text-align: right; font-family: monospace; }
+.file-mtime { color: var(--muted); font-size: calc(12px * var(--ui-scale)); width: calc(150px * var(--ui-scale)); text-align: right; }
+.file-ops { display: flex; gap: calc(3px * var(--ui-scale)); visibility: hidden; }
+.file-row:hover .file-ops { visibility: visible; }
+.loading { padding: calc(40px * var(--ui-scale)); text-align: center; color: var(--muted); }
+.load-more { text-align: center; padding: calc(10px * var(--ui-scale)); }
+
+/* 模态框 */
+.modal {
+  position: fixed; inset: 0; background: rgba(0,0,0,.35);
+  display: flex; align-items: center; justify-content: center; z-index: 100;
+}
+.modal-card {
+  background: var(--panel); border-radius: var(--radius); padding: calc(20px * var(--ui-scale));
+  width: min(calc(440px * var(--ui-scale)), 92vw); box-shadow: 0 10px 40px rgba(0,0,0,.2);
+}
+.modal-title { font-size: calc(18px * var(--ui-scale)); font-weight: 700; margin-bottom: calc(14px * var(--ui-scale)); }
+.modal-body { display: flex; flex-direction: column; gap: calc(10px * var(--ui-scale)); }
+.modal-foot { display: flex; justify-content: flex-end; gap: calc(8px * var(--ui-scale)); margin-top: calc(16px * var(--ui-scale)); }
+.field { display: flex; flex-direction: column; gap: calc(4px * var(--ui-scale)); }
+.field label { font-size: calc(12px * var(--ui-scale)); color: var(--muted); }
+.field input, .field select {
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: calc(6px * var(--ui-scale)) calc(8px * var(--ui-scale)); font-size: calc(14px * var(--ui-scale));
+  font-family: inherit; background: var(--panel); color: var(--text);
+}
+.field input:focus, .field select:focus { outline: none; border-color: var(--accent); }
+.field-row { display: flex; gap: calc(10px * var(--ui-scale)); }
+.field-row > .field { flex: 1; }
+
+/* Toast */
+.toast {
+  position: fixed; bottom: calc(20px * var(--ui-scale)); left: 50%; transform: translateX(-50%);
+  background: var(--text); color: #fff; padding: calc(10px * var(--ui-scale)) calc(16px * var(--ui-scale));
+  border-radius: var(--radius); z-index: 200; box-shadow: 0 4px 20px rgba(0,0,0,.25);
+  font-size: calc(13px * var(--ui-scale));
+}
+.toast.ok { background: var(--success); }
+.toast.err { background: var(--danger); }
+
+.hidden { display: none !important; }
+
+/* 上下文菜单 */
+.ctx-menu {
+  position: fixed; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--shadow); z-index: 300; padding: calc(4px * var(--ui-scale));
+  min-width: calc(160px * var(--ui-scale));
+}
+.ctx-item { padding: calc(6px * var(--ui-scale)) calc(12px * var(--ui-scale)); cursor: pointer; font-size: calc(13px * var(--ui-scale)); border-radius: var(--radius-sm); }
+.ctx-item:hover { background: var(--accent-soft); color: var(--accent); }
+.ctx-item.danger { color: var(--danger); }
+.ctx-item.danger:hover { background: #fdeeee; }

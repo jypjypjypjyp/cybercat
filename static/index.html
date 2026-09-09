@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SFTP Manager</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div id="app" class="app">
+    <!-- 顶部栏 -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="logo">⛁ SFTP Manager</span>
+      </div>
+      <div class="topbar-right">
+        <button id="btn-home" class="btn ghost" title="回到书签页">书签</button>
+        <div class="zoom-control" title="缩放">
+          <button id="zoom-out" class="btn ghost">−</button>
+          <span id="zoom-label" class="zoom-label">100%</span>
+          <button id="zoom-in" class="btn ghost">+</button>
+          <button id="zoom-reset" class="btn ghost" title="重置">⌂</button>
+        </div>
+      </div>
+    </header>
+
+    <!-- 内容区：书签页 或 文件浏览器 -->
+    <main id="view-books" class="view"></main>
+    <main id="view-browser" class="view hidden"></main>
+  </div>
+
+  <!-- 模态框 -->
+  <div id="modal" class="modal hidden"></div>
+
+  <!-- Toast -->
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- 隐藏的 file input -->
+  <input type="file" id="file-input" class="hidden" multiple>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
