@@ -99,20 +99,25 @@ body {
   background: transparent;
   color: var(--text);
   border-radius: var(--radius-ctl);
-  padding: calc(5px * var(--u)) calc(14px * var(--u));
+  padding: calc(7px * var(--u)) calc(16px * var(--u));
+  min-height: calc(32px * var(--u));
   font-family: var(--font-body);
   font-size: calc(13px * var(--u));
   font-weight: 500;
   cursor: pointer;
-  transition: background .12s ease, color .12s ease, border-color .12s ease, box-shadow .12s ease;
+  transition: background .14s ease, color .14s ease, border-color .14s ease,
+              box-shadow .18s ease, transform .14s ease;
   white-space: nowrap;
 }
 .btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+/* 统一 hover 动效 + 阴影；active 按压 */
+.btn:hover { transform: translateY(-1px); box-shadow: var(--shadow-2); }
+.btn:active { transform: translateY(0); box-shadow: none; }
 
 /* primary: 实验用 */
-.btn.primary { background: var(--accent); color: #fff; }
-.btn.primary:hover { background: var(--accent-hover); }
-.btn.primary:active { background: var(--accent-press); }
+.btn.primary { background: var(--accent); color: #fff; box-shadow: var(--shadow-2); }
+.btn.primary:hover { background: var(--accent-hover); box-shadow: var(--shadow-4); }
+.btn.primary:active { background: var(--accent-press); box-shadow: var(--shadow-2); }
 
 /* subtle (ghost) */
 .btn.ghost { background: transparent; color: var(--text); }
@@ -127,7 +132,7 @@ body {
 .btn.danger { background: transparent; color: var(--danger); }
 .btn.danger:hover { background: rgba(196,43,28,.08); }
 
-.btn.sm { padding: calc(3px * var(--u)) calc(9px * var(--u)); font-size: calc(12px * var(--u)); border-radius: calc(3px * var(--u)); }
+.btn.sm { padding: calc(5px * var(--u)) calc(12px * var(--u)); min-height: calc(28px * var(--u)); font-size: calc(12px * var(--u)); }
 .btn.active { background: var(--accent-soft); color: var(--accent); }
 
 /* ============ 缩放控件 ============ */
@@ -175,16 +180,14 @@ body {
   border-radius: var(--radius-card);
   padding: calc(16px * var(--u));
   box-shadow: var(--shadow-2);
-  transition: box-shadow .16s ease, transform .16s ease, border-color .16s ease;
+  transition: box-shadow .18s ease, transform .18s ease, border-color .18s ease;
 }
-.book-card::before {
-  content: ""; position: absolute; inset: 0; border-radius: var(--radius-card);
-  pointer-events: none;
-  background: linear-gradient(135deg, rgba(255,255,255,.6), rgba(0,120,212,.05));
-  opacity: 0; transition: opacity .16s ease;
+/* 悬浮：仅加深阴影 + 上浮 + 边框强调，背景不变浅 */
+.book-card:hover {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-8);
+  transform: translateY(-3px);
 }
-.book-card:hover { border-color: var(--border-strong); box-shadow: var(--shadow-8); transform: translateY(-2px); }
-.book-card:hover::before { opacity: 1; }
 
 .book-top { display: flex; align-items: center; gap: calc(10px * var(--u)); }
 .book-avatar {
@@ -403,9 +406,6 @@ html[data-theme="dark"] {
 html[data-theme="dark"] .btn.ghost:hover { background: rgba(255,255,255,.08); }
 html[data-theme="dark"] .btn.danger:hover { background: rgba(255,107,95,.12); }
 html[data-theme="dark"] .zoom-control { background: rgba(255,255,255,.06); }
-html[data-theme="dark"] .book-card::before {
-  background: linear-gradient(135deg, rgba(255,255,255,.04), rgba(76,194,255,.06));
-}
 html[data-theme="dark"] .btn.primary { color: #111; }
 
 /* ============ 无障碍: 尊重 reduced motion ============ */

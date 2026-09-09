@@ -346,7 +346,7 @@
         <div class="file-row ${checked?"selected":""}" data-path="${escapeAttr(e.path)}" data-dir="${e.is_dir}">
           <div class="file-check"><input type="checkbox" ${checked} onchange="event.stopPropagation();SFPM.toggleCheck('${escapeAttrSingle(e.path)}',this.checked)"></div>
           <div class="file-icon">${e.is_dir ? "📁" : fileIcon(e.name)}</div>
-          <div class="file-name ${e.is_dir ? "dir" : ""}" ${e.is_dir ? `ondblclick="SFPM.openDir('${escapeAttrSingle(e.path)}')" onclick="SFPM.selectRow(this)"` : `ondblclick="SFPM.downloadOne('${escapeAttrSingle(e.path)}')" `}>${escapeHtml(e.name)}</div>
+          <div class="file-name ${e.is_dir ? "dir" : ""}" ${e.is_dir ? `onclick="SFPM.openDir('${escapeAttrSingle(e.path)}')"` : `ondblclick="SFPM.downloadOne('${escapeAttrSingle(e.path)}')" `}>${escapeHtml(e.name)}</div>
           <div class="file-size">${e.is_dir ? "-" : fmtSize(e.size)}</div>
           <div class="file-mtime">${fmtTime(e.mtime)}</div>
           <div class="file-ops">
