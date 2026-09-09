@@ -12,6 +12,7 @@ from pydantic import BaseModel
 import app.bookmarks as bookmarks
 import app.config as config
 import app.sftp_ops as sfops
+import app.sync as syncer
 from app.keychain import get_password, set_password, delete_password
 from app.session_pool import SessionPool
 
@@ -86,6 +87,16 @@ class BookmarkIn(BaseModel):
 @app.get("/api/bookmarks")
 def list_bookmarks():
     return bookmarks.load_bookmarks()
+
+
+@app.post("/api/sync-ssh-config")
+def sync_ssh_config():
+    """从 ~/.ssh/config 同步到书签：存在的覆盖，没有的新建。"""
+    try:
+        result = syncer.sync_from_ssh_config()
+        return {"ok": True, **result}
+    except Exception as e:
+        raise HTTPException(500, f"同步失败: {e}")
 
 
 @app.post("/api/bookmarks", status_code=201)

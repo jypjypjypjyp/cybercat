@@ -108,7 +108,10 @@
     const header = `
       <div class="books-header">
         <div class="books-title">我的书签</div>
-        <button class="btn primary" onclick="SFPM.openBookForm()">+ 新建书签</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn" onclick="SFPM.syncSsh()">⤓ 同步 SSH 配置</button>
+          <button class="btn primary" onclick="SFPM.openBookForm()">+ 新建书签</button>
+        </div>
       </div>`;
     let grid;
     if (state.bookmarks.length === 0) {
@@ -210,6 +213,17 @@
     try {
       const r = await api("POST", `/api/bookmarks/${id}/test`);
       toast(r.message, r.ok ? "ok" : "err");
+    } catch (e) {
+      toast(e.message, "err");
+    }
+  }
+
+  async function syncSsh() {
+    toast("正在同步 ~/.ssh/config ...");
+    try {
+      const r = await api("POST", "/api/sync-ssh-config");
+      toast(`同步完成：新建 ${r.created}，覆盖 ${r.updated}`, "ok");
+      loadBookmarks();
     } catch (e) {
       toast(e.message, "err");
     }
@@ -437,7 +451,7 @@
 
   // ---------- 启动 ----------
   window.SFPM = {
-    showBooks, connect, openBookForm, saveBook, delBook, testBook,
+    showBooks, connect, openBookForm, saveBook, delBook, testBook, syncSsh,
     goto, goUp, loadMore, openDir, selectRow, newDir, uploadFile, downloadOne, renameItem, deleteItem, back,
     closeModal,
   };

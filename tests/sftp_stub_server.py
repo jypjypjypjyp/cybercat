@@ -58,6 +58,7 @@ class StubSFTPServer(SFTPServerInterface):
                 attrs.filename = name
                 attrs.st_mode = st.st_mode
                 attrs.st_size = st.st_size
+                attrs.st_atime = int(st.st_atime)  # 必须同时设 atime，否则 FLAG_AMTIME 不置位
                 attrs.st_mtime = int(st.st_mtime)
                 out.append(attrs)
             return out
@@ -71,6 +72,7 @@ class StubSFTPServer(SFTPServerInterface):
             a = SFTPAttributes()
             a.st_mode = st.st_mode
             a.st_size = st.st_size
+            a.st_atime = int(st.st_atime)
             a.st_mtime = int(st.st_mtime)
             return a
         except OSError as e:
