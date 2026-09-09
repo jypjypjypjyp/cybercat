@@ -248,6 +248,16 @@ def download(bid: str, path: str):
             with s.lock:
                 f = s.client.open(path, "rb")
                 try:
+                    # 提速：SFTP 预取。先显式 stat 拿 size（避免部分服务器 stat hangs），
+                    # 再让后台线程并发抓取数据块（多块在飞行，消除串行 RTT）。
+                    try:
+                        size = f.stat().st_size
+                    except Exception:
+                        size = None
+                    try:
+                        f.prefetch(file_size=size, max_concurrent_requests=16)
+                    except Exception:
+                        pass  # 预取失败则退回串行读
                     while chunk := f.read(256 * 1024):
                         yield chunk
                 finally:

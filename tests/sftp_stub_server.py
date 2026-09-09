@@ -27,11 +27,41 @@ class StubServer(ServerInterface):
 
 
 class StubSFTPHandle(SFTPHandle):
+    # 可配置的每块读延迟（秒），用于模拟高 RTT 场景做 prefetch 收益实测
+    read_delay = 0.0
+
+    def __init__(self, flags):
+        super().__init__(flags)
+        self.read_delay = StubSFTPHandle.read_delay
+
+    def read(self, offset, length):
+        import time as _time
+        if self.read_delay:
+            _time.sleep(self.read_delay)  # 模拟每块一个 RTT
+        try:
+            self.readfile.seek(offset)
+            data = self.readfile.read(length)
+            if isinstance(data, str):
+                data = data.encode("utf-8")
+            return data
+        except OSError as e:
+            return paramiko.SFTPServer.convert_errno(e.errno)
+
     def stat(self):
         try:
             return self.fstat()
         except OSError as e:
             raise paramiko.SFTPError(e)
+
+    def fstat(self):
+        import stat as statmod
+        st = os.stat(self.filename)
+        a = paramiko.SFTPAttributes()
+        a.st_mode = st.st_mode
+        a.st_size = st.st_size
+        a.st_atime = int(st.st_atime)
+        a.st_mtime = int(st.st_mtime)
+        return a
 
 
 class StubSFTPServer(SFTPServerInterface):
