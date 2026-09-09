@@ -14,6 +14,11 @@
     selected: null,
     loading: false,
     scale: 1,
+    sortKey: "name",   // name | mtime | size
+    sortDir: "asc",    // asc | desc
+    theme: "light",
+    checkAll: false,
+    selectedSet: new Set(),  // 多选路径集合
   };
 
   const $ = (sel) => document.querySelector(sel);
@@ -294,17 +299,53 @@
         <button class="btn outline sm" onclick="SFPM.goUp()" title="上级">↑ 上级</button>
         <button class="btn outline sm" onclick="SFPM.newDir()">+ 新建目录</button>
         <button class="btn outline sm" onclick="SFPM.uploadFile()">↑ 上传</button>
+        <select class="sort-select sm" title="排序字段" onchange="SFPM.setSort(this.value)">
+          <option value="name" ${state.sortKey==="name"?"selected":""}>按名称</option>
+          <option value="mtime" ${state.sortKey==="mtime"?"selected":""}>按时间</option>
+          <option value="size" ${state.sortKey==="size"?"selected":""}>按大小</option>
+        </select>
+        <button class="btn outline sm" title="升序" onclick="SFPM.toggleSortDir()">${state.sortDir==="asc"?"↑":"↓"} ${state.sortDir==="asc"?"升":"降"}</button>
         <span class="count">${state.total} 项</span>
       </div>`;
+
+    // 排序：目录永远优先；目录内部与文件内部各自按 sortKey/sortDir 排序
+    const dirs = state.entries.filter(e => e.is_dir);
+    const files = state.entries.filter(e => !e.is_dir);
+    const cmp = (a, b) => {
+      let av, bv;
+      if (state.sortKey === "mtime") { av = a.mtime || 0; bv = b.mtime || 0; }
+      else if (state.sortKey === "size") { av = a.size || 0; bv = b.size || 0; }
+      else { av = a.name.toLowerCase(); bv = b.name.toLowerCase(); }
+      if (av < bv) return -1;
+      if (av > bv) return 1;
+      return 0;
+    };
+    const sortedDirs = [...dirs].sort(cmp);
+    const sortedFiles = [...files].sort(cmp);
+    if (state.sortDir === "desc") { sortedDirs.reverse(); sortedFiles.reverse(); }
+    const viewEntries = sortedDirs.concat(sortedFiles);
+
+    const selCount = state.selectedSet.size;
+    const batchBar = selCount > 0 ? `
+      <div class="batch-bar">
+        <input type="checkbox" class="check-all" ${state.checkAll?"checked":""} onchange="SFPM.toggleCheckAll(this.checked)">
+        <span class="count">已选 ${selCount} 项</span>
+        <div class="spacer" style="flex:1"></div>
+        <button class="btn outline sm" onclick="SFPM.batchDownload()">批量下载</button>
+        <button class="btn danger sm" onclick="SFPM.batchDelete()">批量删除</button>
+      </div>` : "";
 
     let listHtml;
     if (state.entries.length === 0 && !state.loading) {
       listHtml = `<div class="loading">（空目录或还未加载）</div>`;
     } else {
-      listHtml = `<div class="file-list">` + state.entries.map((e) => `
-        <div class="file-row" data-path="${escapeAttr(e.path)}" data-dir="${e.is_dir}" onclick="SFPM.selectRow(this)">
+      const rows = viewEntries.map((e) => {
+        const checked = state.selectedSet.has(e.path) ? "checked" : "";
+        return `
+        <div class="file-row ${checked?"selected":""}" data-path="${escapeAttr(e.path)}" data-dir="${e.is_dir}">
+          <div class="file-check"><input type="checkbox" ${checked} onchange="event.stopPropagation();SFPM.toggleCheck('${escapeAttrSingle(e.path)}',this.checked)"></div>
           <div class="file-icon">${e.is_dir ? "📁" : fileIcon(e.name)}</div>
-          <div class="file-name ${e.is_dir ? "dir" : ""}" ${e.is_dir ? `ondblclick="SFPM.openDir('${escapeAttrSingle(e.path)}')"` : `ondblclick="SFPM.downloadOne('${escapeAttrSingle(e.path)}')"`}>${escapeHtml(e.name)}</div>
+          <div class="file-name ${e.is_dir ? "dir" : ""}" ${e.is_dir ? `ondblclick="SFPM.openDir('${escapeAttrSingle(e.path)}')" onclick="SFPM.selectRow(this)"` : `ondblclick="SFPM.downloadOne('${escapeAttrSingle(e.path)}')" `}>${escapeHtml(e.name)}</div>
           <div class="file-size">${e.is_dir ? "-" : fmtSize(e.size)}</div>
           <div class="file-mtime">${fmtTime(e.mtime)}</div>
           <div class="file-ops">
@@ -312,7 +353,9 @@
             <button class="btn sm" title="重命名" onclick="event.stopPropagation();SFPM.renameItem('${escapeAttrSingle(e.path)}')">✎</button>
             <button class="btn danger sm" title="删除" onclick="event.stopPropagation();SFPM.deleteItem('${escapeAttrSingle(e.path)}')">🗑</button>
           </div>
-        </div>`).join("") + `</div>`;
+        </div>`;
+      }).join("");
+      listHtml = `<div class="file-list">${rows}</div>`;
     }
 
     const loadMore = state.hasMore
@@ -322,6 +365,7 @@
     $("#view-browser").innerHTML = `
       <div class="crumbs">${crumbHtml}</div>
       ${toolbar}
+      ${batchBar}
       ${listHtml}
       ${loadMore}
     `;
@@ -408,6 +452,67 @@
 
   function back() { showBooks(); }
 
+  // ---------- 排序 ----------
+  function setSort(key) { state.sortKey = key; renderBrowser(); }
+  function toggleSortDir() { state.sortDir = state.sortDir === "asc" ? "desc" : "asc"; renderBrowser(); }
+
+  // ---------- 多选 ----------
+  function toggleCheck(path, checked) {
+    if (checked) state.selectedSet.add(path);
+    else state.selectedSet.delete(path);
+    state.checkAll = state.selectedSet.size === state.entries.filter(e => e.is_dir || !e.is_dir).length && state.entries.length > 0;
+    renderBrowser();
+  }
+  function toggleCheckAll(checked) {
+    state.selectedSet.clear();
+    if (checked) state.entries.forEach(e => state.selectedSet.add(e.path));
+    state.checkAll = checked;
+    renderBrowser();
+  }
+  function selectedPaths() {
+    // 保持与当前排序一致：取 entries 中在 selectedSet 里的，目录优先
+    const all = state.entries.filter(e => state.selectedSet.has(e.path));
+    return all.map(e => e.path);
+  }
+  async function batchDelete() {
+    const paths = selectedPaths();
+    if (paths.length === 0) return;
+    if (!confirm(`删除选中的 ${paths.length} 项？`)) return;
+    for (const p of paths) {
+      try { await api("POST", `/api/bookmarks/${state.current.id}/delete?path=${encodeURIComponent(p)}`); }
+      catch (e) { toast(`删除 ${p} 失败: ${e.message}`, "err"); }
+    }
+    state.selectedSet.clear(); state.checkAll = false;
+    toast(`已删除 ${paths.length} 项`, "ok");
+    loadDir();
+  }
+  async function batchDownload() {
+    const paths = selectedPaths().filter(p => !state.entries.find(e => e.path === p)?.is_dir);
+    if (paths.length === 0) { toast("请选择要下载的文件", "err"); return; }
+    for (const p of paths) {
+      const url = `/api/bookmarks/${state.current.id}/download?path=${encodeURIComponent(p)}`;
+      const a = document.createElement("a");
+      a.href = url; a.download = p.split("/").pop();
+      document.body.appendChild(a); a.click(); a.remove();
+    }
+  }
+
+  // ---------- 主题 ----------
+  function applyTheme(t) {
+    document.documentElement.setAttribute("data-theme", t);
+    const btn = $("#theme-toggle");
+    if (btn) btn.textContent = t === "dark" ? "☀ 亮色" : "🌙 暗色";
+    localStorage.setItem("cybercat_theme", t);
+  }
+  function toggleTheme() {
+    const next = state.theme === "dark" ? "light" : "dark";
+    state.theme = next; applyTheme(next);
+  }
+  function initTheme() {
+    const saved = localStorage.getItem("cybercat_theme") || "light";
+    state.theme = saved; applyTheme(saved);
+  }
+
   // ---------- 模态框 ----------
   function openModal(html) {
     const m = $("#modal");
@@ -444,6 +549,7 @@
   // ---------- 事件绑定 ----------
   function bind() {
     $("#btn-home").onclick = showBooks;
+    $("#theme-toggle").onclick = toggleTheme;
     $("#zoom-in").onclick = () => zoom(0.1);
     $("#zoom-out").onclick = () => zoom(-0.1);
     $("#zoom-reset").onclick = zoomReset;
@@ -461,9 +567,12 @@
   window.SFPM = {
     showBooks, connect, openBookForm, saveBook, delBook, testBook, syncSsh,
     goto, goUp, loadMore, openDir, selectRow, newDir, uploadFile, downloadOne, renameItem, deleteItem, back,
+    setSort, toggleSortDir, toggleCheck, toggleCheckAll, batchDelete, batchDownload,
+    toggleTheme,
     closeModal,
   };
   bind();
   initScale();
+  initTheme();
   loadBookmarks();
 })();
