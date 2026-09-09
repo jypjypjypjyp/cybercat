@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Cyber Cat favicon: Fluent 蓝圆角底 + 白色猫爪 -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0078d4"/>
+      <stop offset="1" stop-color="#4fa3e8"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#bg)"/>
+  <!-- 猫爪：中心掌垫 + 4 趾 -->
+  <g fill="#ffffff">
+    <ellipse cx="32" cy="40" rx="9" ry="8"/>
+    <ellipse cx="18" cy="27" rx="4.5" ry="6"/>
+    <ellipse cx="27" cy="20" rx="4.5" ry="6"/>
+    <ellipse cx="37" cy="20" rx="4.5" ry="6"/>
+    <ellipse cx="46" cy="27" rx="4.5" ry="6"/>
+  </g>
+</svg>
