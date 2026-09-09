@@ -422,8 +422,15 @@
   }
 
   async function parseUrlOnLoad() {
-    // location.pathname 形如 /{host}/{path...}
-    const parts = location.pathname.split("/").filter(Boolean);
+    // 兼容两种 URL：pathname 路由 /{host}/{path} 与 hash 路由 #/host/path
+    let route = null;
+    if (location.hash.startsWith("#/")) {
+      route = location.hash.slice(1);          // "/host/path"
+    } else if (location.pathname && location.pathname !== "/") {
+      route = location.pathname;
+    }
+    if (!route || route === "/") return;
+    const parts = route.split("/").filter(Boolean);
     if (parts.length < 1) return;
     if (!state.bookmarks.length) await loadBookmarks();
     const hostKey = parts[0];
@@ -611,6 +618,8 @@
     });
     // 点击 modal 背景关闭
     $("#modal").addEventListener("click", (e) => { if (e.target.id === "modal") closeModal(); });
+    // hash 路由变化时重新解析（支持 #/host/path 链接）
+    window.addEventListener("hashchange", () => parseUrlOnLoad());
   }
 
   // ---------- 启动 ----------
