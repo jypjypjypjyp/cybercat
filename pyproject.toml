@@ -1,7 +1,7 @@
 [project]
-name = "sftp-manager"
+name = "cybercat"
 version = "0.1.0"
-description = "极简 SFTP 文件浏览器（macOS，webUI + Python）"
+description = "极简版 macOS SFTP 文件浏览器 — webUI + Python（FastAPI + paramiko）"
 requires-python = ">=3.10"
 dependencies = [
     "paramiko>=5.0.0",
