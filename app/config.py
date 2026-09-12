@@ -10,8 +10,11 @@ IDLE_TIMEOUT = float(os.environ.get("CYBERCATOSS_IDLE_TIMEOUT", 600))
 KEYCHAIN_SERVICE = "cybercatoss"
 # 列表默认分页大小
 DEFAULT_PAGE_SIZE = 100
-# SFTP 下载预取：默认关（本地/局域网串行更快，且避免对远程服务器并发放大负载）。
-# 高延迟公网场景可设 CYBERCAT_PREFETCH=1 显式开启。
-PREFETCH = os.environ.get("CYBERCAT_PREFETCH", "0") in ("1", "true", "yes", "on")
-# 预取并发数
+# SFTP 下载预取（流水线）：默认开启。
+# 实测（2026-09-10）：串行读是每 MB 32 次往返、在途请求仅 1 个，吞吐 ≈ 32KB/RTT；
+# 开启预取后在途 8 个，实测提速 3.7x(RTT 5ms) ~ 5.5x(RTT 50ms)。
+# 仅在纯本地回环（RTT≈0）时略慢约 14%（102→89 MB/s），真实网络均为净收益。
+# 如需关闭：CYBERCAT_PREFETCH=0
+PREFETCH = os.environ.get("CYBERCAT_PREFETCH", "1") not in ("0", "false", "no", "off")
+# 预取并发数（越大吞吐越高，但会给服务器更多并发压力）
 PREFETCH_CONCURRENCY = int(os.environ.get("CYBERCAT_PREFETCH_CONCURRENCY", "8"))

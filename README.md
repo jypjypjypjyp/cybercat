@@ -84,7 +84,7 @@ run.py            直接启动入口
 | `CYBERCATOSS_CONFIG_DIR` | 覆盖配置目录 |
 | `CYBERCATOSS_IDLE_TIMEOUT` | 会话空闲回收秒数（默认 600） |
 | `CYBERCAT_PORT` | 监听端口（默认 9000） |
-| `CYBERCAT_PREFETCH` | `=1` 开启 SFTP 下载预取（**默认关**，仅高延迟公网有益） |
+| `CYBERCAT_PREFETCH` | SFTP 下载预取（流水线），**默认开启**；`=0` 关闭 |
 | `CYBERCAT_PREFETCH_CONCURRENCY` | 预取并发数（默认 8） |
 
 ## 设计说明
