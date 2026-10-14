@@ -91,6 +91,26 @@ body {
   box-shadow: var(--shadow-2);
 }
 
+/* ============ 顶栏链接状态 ============ */
+.link-state {
+  display: inline-flex; align-items: center; gap: calc(7px * var(--u));
+  padding: calc(5px * var(--u)) calc(11px * var(--u));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-ctl);
+  background: var(--surface-2);
+  font-size: calc(12.5px * var(--u));
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.link-state::before {
+  content: ""; flex: none;
+  width: calc(8px * var(--u)); height: calc(8px * var(--u));
+  border-radius: 50%;
+  background: var(--text-tertiary);
+}
+.link-state[data-state="connected"]::before { background: var(--success); }
+.link-state[data-state="idle"]::before { background: var(--warning); }
+
 /* ============ 按钮 (Fluent) ============ */
 .btn {
   appearance: none; -webkit-appearance: none;
@@ -238,6 +258,12 @@ body {
   border-bottom: 1px solid var(--border);
   background: var(--surface-2);
 }
+/* 面包屑 + 工具栏 + 批量条一起吸在顶栏下面：滚长列表时路径、排序、批量操作都不该滑走。
+   顶栏自己 sticky 在 0（实测高 57px × 缩放），这里跟着它往下排。 */
+.browser-head {
+  position: sticky; top: calc(57px * var(--u)); z-index: 15;
+  background: var(--surface);
+}
 .count {
   margin-left: auto; font-family: var(--font-mono); font-size: calc(12px * var(--u)); color: var(--text-secondary);
 }
@@ -255,6 +281,13 @@ body {
   border-bottom: 1px solid var(--bg);
   cursor: default;
   transition: background .1s ease;
+}
+/* 长列表：屏外的行不参与排版与绘制。两万行时一次全量重排要几十秒（排序点下去就卡在那），
+   跳过屏外行之后同样的操作只要零点几秒。这个值说的是内容盒高度：行高 49px − 上下 padding 16px
+   − 下边框 1px = 32px，给准了滚动条长度才跟真实内容一致（用 auto 或直接用 49 都会撑大 35%）。 */
+.file-row {
+  content-visibility: auto;
+  contain-intrinsic-size: calc(32px * var(--u));
 }
 /* reveal 高光 */
 .file-row::after {
@@ -409,6 +442,70 @@ html[data-theme="dark"] .btn.ghost:hover { background: rgba(255,255,255,.08); }
 html[data-theme="dark"] .btn.danger:hover { background: rgba(255,107,95,.12); }
 html[data-theme="dark"] .zoom-control { background: rgba(255,255,255,.06); }
 html[data-theme="dark"] .btn.primary { color: #111; }
+
+/* ============ 预览 ============ */
+/* 打开预览先铺一层不透明的「膜」（浅色=纯白，深色=跟随主题），上面放进度条与取消 */
+.modal.preview { background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; }
+/* 白膜：绝对铺满弹层、盖在卡片之上（卡片同层但先入 DOM，被它挡住） */
+.preview-veil {
+  position: absolute; inset: 0; z-index: 1; background: var(--surface);
+  display: flex; align-items: center; justify-content: center;
+}
+.veil-card {
+  display: flex; flex-direction: column; align-items: center; gap: calc(14px * var(--u));
+  padding: calc(28px * var(--u)); width: min(calc(420px * var(--u)), 88vw); text-align: center;
+}
+.veil-name {
+  font-family: var(--font-mono); font-weight: 600; font-size: calc(15px * var(--u));
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.veil-meta { font-size: calc(12px * var(--u)); color: var(--text-secondary); }
+.veil-bar { width: 100%; height: calc(6px * var(--u)); border-radius: 999px; background: var(--bg); overflow: hidden; }
+.veil-bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .12s linear; }
+.veil-bar.indeterminate > i { width: 38%; animation: veil-slide 1.1s ease-in-out infinite; }
+@keyframes veil-slide { from { margin-left: -38%; } to { margin-left: 100%; } }
+.veil-hint { font-size: calc(12px * var(--u)); color: var(--text-secondary); min-height: calc(16px * var(--u)); }
+.veil-hint.err { color: var(--danger); }
+
+/* 预览卡：大尺寸变体 */
+.modal.preview .modal-card {
+  width: min(calc(1100px * var(--u)), 94vw); height: min(calc(760px * var(--u)), 86vh);
+  display: flex; flex-direction: column; padding: calc(16px * var(--u));
+}
+.preview-head { display: flex; align-items: center; gap: calc(10px * var(--u)); margin-bottom: calc(12px * var(--u)); }
+.preview-name { font-family: var(--font-mono); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preview-meta { font-size: calc(12px * var(--u)); color: var(--text-secondary); white-space: nowrap; }
+.preview-body {
+  flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column;
+  background: var(--bg); border: 1px solid var(--border); border-radius: calc(8px * var(--u));
+}
+.preview-center { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: calc(12px * var(--u)); }
+.preview-img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: calc(6px * var(--u)); }
+.preview-media { width: 100%; max-height: 100%; border-radius: calc(6px * var(--u)); background: #000; }
+.preview-media.audio { width: min(calc(560px * var(--u)), 100%); background: none; }
+.preview-frame { flex: 1; width: 100%; min-height: 0; border: 0; background: var(--surface); }
+.preview-note {
+  position: sticky; top: 0; z-index: 1; padding: calc(8px * var(--u)) calc(12px * var(--u));
+  font-size: calc(12px * var(--u)); color: var(--text-secondary);
+  background: var(--surface); border-bottom: 1px solid var(--border);
+}
+.preview-notice { color: var(--text-secondary); font-size: calc(13px * var(--u)); line-height: 1.9; text-align: center; }
+
+/* 代码展示：左边行号列（sticky），右边代码，共用一个滚动容器 */
+.code-wrap { display: flex; align-items: flex-start; font-family: var(--font-mono); font-size: calc(12.5px * var(--u)); line-height: 1.55; }
+.code-gutter {
+  position: sticky; left: 0; margin: 0; padding: calc(12px * var(--u)) calc(10px * var(--u));
+  text-align: right; color: var(--text-tertiary); background: var(--surface);
+  border-right: 1px solid var(--border); user-select: none;
+}
+.code-body { margin: 0; padding: calc(12px * var(--u)) calc(14px * var(--u)); white-space: pre; color: var(--text); }
+.tok-s { color: #0a7d3c; }
+.tok-c { color: var(--text-tertiary); font-style: italic; }
+.tok-n { color: #9d5d00; }
+.tok-k { color: #0b57d0; font-weight: 600; }
+html[data-theme="dark"] .tok-s { color: #7ee787; }
+html[data-theme="dark"] .tok-n { color: #ffab70; }
+html[data-theme="dark"] .tok-k { color: #79c0ff; }
 
 /* ============ 无障碍: 尊重 reduced motion ============ */
 @media (prefers-reduced-motion: reduce) {

@@ -1,16 +1,19 @@
+import asyncio
 import os
 import posixpath
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 import paramiko
-from fastapi import FastAPI, HTTPException, Query, UploadFile, File
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, File
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import app.bookmarks as bookmarks
 import app.config as config
+import app.preview as preview
 import app.sftp_ops as sfops
 import app.sync as syncer
 from app.keychain import get_password, set_password, delete_password
@@ -18,11 +21,27 @@ from app.session_pool import SessionPool
 
 pool = SessionPool()
 
+# 空闲会话回收的扫描间隔（秒）；空闲阈值本身是 config.IDLE_TIMEOUT（默认 600s）
+IDLE_SWEEP_SECONDS = 60
+
+
+async def _sweep_idle_sessions():
+    """定期回收空闲会话，直到 lifespan 退出时被取消；关闭连接是阻塞 I/O，丢线程池跑。"""
+    while True:
+        await asyncio.sleep(IDLE_SWEEP_SECONDS)
+        await run_in_threadpool(pool.cleanup_idle)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    yield
-    pool.close_all()
+    sweeper = asyncio.create_task(_sweep_idle_sessions())
+    try:
+        yield
+    finally:
+        sweeper.cancel()
+        with suppress(asyncio.CancelledError):
+            await sweeper
+        pool.close_all()
 
 
 app = FastAPI(title="SFTP Manager", lifespan=lifespan)
@@ -57,7 +76,7 @@ def _connect(bookmark):
         client.get_transport().set_keepalive(30)
     except Exception:
         pass
-    return client.open_sftp()
+    return client
 
 
 def _session_alive(s):
@@ -91,9 +110,19 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+def _index_response() -> HTMLResponse:
+    """index.html 里的静态资源带上文件 mtime 当版本号：改完前端，普通刷新就能拿到新界面
+    （浏览器缓存是按 URL 认的，URL 不变就可能一直用旧的）。"""
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    for name in ("style.css", "app.js"):
+        stamp = int((STATIC_DIR / name).stat().st_mtime)
+        html = html.replace(f'/static/{name}"', f'/static/{name}?v={stamp}"')
+    return HTMLResponse(html)
+
+
 @app.get("/")
 def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    return _index_response()
 
 
 # ---------- 书签 ----------
@@ -205,8 +234,8 @@ def _with_reconnect(bid, fn, error_prefix):
 
 
 @app.get("/api/bookmarks/{bid}/list")
-def list_files(bid: str, path: str = Query("/"), limit: int = Query(config.DEFAULT_PAGE_SIZE)):
-    return _with_reconnect(bid, lambda s: sfops.list_dir(s, path, limit=limit), "列表")
+def list_files(bid: str, path: str = Query("/")):
+    return _with_reconnect(bid, lambda s: sfops.list_dir(s, path), "列表")
 
 
 @app.post("/api/bookmarks/{bid}/mkdir")
@@ -239,31 +268,46 @@ def delete(bid: str, path: str):
         raise HTTPException(500, f"删除失败: {e}")
 
 
+def _stream_download(session, path):
+    """下载流：走传输通道，全程只占传输闸门，控制通道的锁一直空着。"""
+    with session.transfer_gate:
+        f = session.transfer_client().open(path, "rb")
+        try:
+            # SFTP 预取（流水线）：默认开启，把串行 32KB 往返变为多请求在途。
+            # 实测真实 RTT 下提速 3.7~5.5 倍；可用 CYBERCAT_PREFETCH=0 关闭。
+            if config.PREFETCH:
+                try:
+                    size = f.stat().st_size
+                    f.prefetch(file_size=size, max_concurrent_requests=config.PREFETCH_CONCURRENCY)
+                except Exception:
+                    pass  # 预取失败则退回串行读
+            while chunk := f.read(256 * 1024):
+                yield chunk
+        finally:
+            f.close()
+
+
+async def _stream_body(session, path):
+    """把同步下载流包成异步生成器，负责收尾。
+
+    Starlette 的 iterate_in_threadpool 不负责关闭被包的同步生成器，只等垃圾回收；
+    浏览器取消下载时这里会收到取消异常，finally 立刻关掉同步生成器，闸门和文件句柄随之释放。
+    """
+    gen = _stream_download(session, path)
+    try:
+        async for chunk in iterate_in_threadpool(gen):
+            yield chunk
+    finally:
+        gen.close()
+
+
 @app.get("/api/bookmarks/{bid}/download")
 def download(bid: str, path: str):
     try:
         s = _get_session(bid)
-
-        def gen():
-            with s.lock:
-                f = s.client.open(path, "rb")
-                try:
-                    # SFTP 预取（流水线）：默认开启，把串行 32KB 往返变为多请求在途。
-                    # 实测真实 RTT 下提速 3.7~5.5 倍；可用 CYBERCAT_PREFETCH=0 关闭。
-                    if config.PREFETCH:
-                        try:
-                            size = f.stat().st_size
-                            f.prefetch(file_size=size, max_concurrent_requests=config.PREFETCH_CONCURRENCY)
-                        except Exception:
-                            pass  # 预取失败则退回串行读
-                    while chunk := f.read(256 * 1024):
-                        yield chunk
-                finally:
-                    f.close()
-
         name = posixpath.basename(path)
         return StreamingResponse(
-            gen(), media_type="application/octet-stream",
+            _stream_body(s, path), media_type="application/octet-stream",
             headers={"Content-Disposition": f'attachment; filename="{name}"'},
         )
     except FileNotFoundError:
@@ -275,15 +319,109 @@ def download(bid: str, path: str):
         raise HTTPException(500, f"下载失败: {e}")
 
 
+def _preview_chunks(session, path, start, end):
+    """预览流：走预览通道（不占传输闸门），从 start 读到 end（含端点）。
+
+    不开预取：预览是小范围随机读，流水线没收益；而且 paramiko 的 prefetch 在
+    提前 close 时会漏一个常驻后台线程（预览开关频繁，正好踩这个坑）。
+    """
+    with session.preview_gate:
+        f = session.preview_client().open(path, "rb")
+        try:
+            if start:
+                f.seek(start)
+            remaining = None if end is None else end - start + 1
+            while remaining is None or remaining > 0:
+                want = 256 * 1024 if remaining is None else min(256 * 1024, remaining)
+                chunk = f.read(want)
+                if not chunk:
+                    break
+                if remaining is not None:
+                    remaining -= len(chunk)
+                yield chunk
+        finally:
+            f.close()
+
+
+async def _stream_preview(session, path, start, end):
+    """异步包装：客户端关掉预览（或按取消）时必须立刻关掉同步生成器。
+
+    同 _stream_body 的理由：Starlette 的 iterate_in_threadpool 不等生成器收尾，
+    少了这层，取消后预览闸门会一直被占，同书签后续预览全部卡死。
+    """
+    gen = _preview_chunks(session, path, start, end)
+    try:
+        async for chunk in iterate_in_threadpool(gen):
+            yield chunk
+    finally:
+        gen.close()
+
+
+@app.get("/api/bookmarks/{bid}/preview")
+def preview_file(bid: str, path: str, request: Request):
+    """预览：inline 输出 + HTTP Range（视频拖动进度、前端只取前 256KB 都靠它）。"""
+    try:
+        s = _get_session(bid)
+        info = sfops.stat(s, path)
+        if info["is_dir"]:
+            raise HTTPException(400, "目录不能预览")
+        size = info["size"]
+        if size > config.PREVIEW_MAX_BYTES:
+            # 超上限连一个字节都不读；直连流式那条路（音视频/PDF 把地址挂给元素）也由这里挡住
+            raise HTTPException(
+                413, f"文件超过预览上限 {config.PREVIEW_MAX_BYTES // (1024 * 1024)} MB，请下载后查看"
+            )
+        mime = preview.guess_mime(path)
+        name = posixpath.basename(path)
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'inline; filename="{name}"',
+        }
+        if mime == "image/svg+xml":
+            # SVG 里可能有脚本：预览时当纯静态图处理，不给它任何加载能力
+            headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'"
+        try:
+            rng = preview.parse_range(request.headers.get("range"), size)
+        except ValueError:
+            headers["Content-Range"] = f"bytes */{size}"
+            raise HTTPException(416, "范围不可满足", headers=headers)
+        if rng is None:
+            return StreamingResponse(
+                _stream_preview(s, path, 0, None), media_type=mime,
+                headers={**headers, "Content-Length": str(size)},
+            )
+        start, end = rng
+        return StreamingResponse(
+            _stream_preview(s, path, start, end), status_code=206, media_type=mime,
+            headers={**headers, "Content-Range": f"bytes {start}-{end}/{size}",
+                     "Content-Length": str(end - start + 1)},
+        )
+    except HTTPException:
+        raise
+    except FileNotFoundError:
+        raise HTTPException(404, "文件不存在")
+    except paramiko.SSHException as e:
+        pool.dispose(bid)
+        raise HTTPException(500, f"连接中断: {e}")
+    except Exception as e:
+        raise HTTPException(500, f"预览失败: {e}")
+
+
+def _upload_file(session, remote, fileobj):
+    """上传：同样走传输通道，全程只占传输闸门，控制通道的锁一直空着。"""
+    with session.transfer_gate:
+        with session.transfer_client().file(remote, "wb") as f:
+            while chunk := fileobj.read(256 * 1024):
+                f.write(chunk)
+
+
 @app.post("/api/bookmarks/{bid}/upload")
 def upload(bid: str, path: str, file: UploadFile = File(...)):
     try:
         s = _get_session(bid)
         remote = posixpath.join(path, file.filename or "upload")
-        with s.lock:
-            with s.client.file(remote, "wb") as f:
-                while chunk := file.file.read(256 * 1024):
-                    f.write(chunk)
+        _upload_file(s, remote, file.file)
         return {"ok": True, "path": remote}
     except paramiko.SSHException as e:
         pool.dispose(bid)
@@ -302,10 +440,18 @@ def connect(bid: str):
         raise HTTPException(500, f"连接失败: {e}")
 
 
+@app.get("/api/bookmarks/{bid}/session")
+def session_state(bid: str):
+    """顶栏链接状态：connected / idle / reclaimed。只读，不建立会话、不碰 last_used。"""
+    if not bookmarks.get_bookmark(bid):
+        raise HTTPException(404, "书签不存在")
+    return {"state": pool.link_state(bid)}
+
+
 # SPA 回退：前端路由 /{hostname}/{path} 返回 index.html 交给前端 JS 接管。
 # 必须放在最后，避免抢占 /api/* 与 /static/*（它们已由更早注册的路由匹配）。
 @app.get("/{full_path:path}")
 def spa_fallback(full_path: str):
     if full_path.startswith("api"):
         raise HTTPException(404, "Not Found")
-    return FileResponse(STATIC_DIR / "index.html")
+    return _index_response()

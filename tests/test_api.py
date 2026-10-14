@@ -99,3 +99,18 @@ def test_delete_bookmark(client, tmp_path, monkeypatch):
 def test_list_unknown_bookmark_404(client):
     r = client.get("/api/bookmarks/nonexist/list?path=/")
     assert r.status_code == 404
+
+
+def test_session_state_reclaimed_for_unconnected(client):
+    """还没连过的书签：会话不在池子里 → 已回收。"""
+    r = client.post("/api/bookmarks", json={
+        "name": "host-s", "host": "1.2.3.4", "port": 22, "username": "root",
+    })
+    bid = r.json()["id"]
+    s = client.get(f"/api/bookmarks/{bid}/session")
+    assert s.status_code == 200
+    assert s.json() == {"state": "reclaimed"}
+
+
+def test_session_state_unknown_bookmark_404(client):
+    assert client.get("/api/bookmarks/nonexist/session").status_code == 404

@@ -21,8 +21,7 @@ def test_mtime_roundtrip_not_null():
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     client.connect(hostname="127.0.0.1", port=port, username="user", password="pass",
                    timeout=5, allow_agent=False, look_for_keys=False)
-    sftp = client.open_sftp()
-    session = sp.SFTPSession(sftp)
+    session = sp.SFTPSession(client)
 
     r = ops.list_dir(session, "/")
     hello = next(e for e in r["entries"] if e["name"] == "hello.txt")
@@ -34,5 +33,4 @@ def test_mtime_roundtrip_not_null():
     assert st["mtime"] is not None
     assert abs(st["mtime"] - real_mtime) < 5
 
-    sftp.close()
     client.close()

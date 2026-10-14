@@ -17,15 +17,20 @@ def _sftp_with_transport(alive):
     return client
 
 
+def _ssh_with_sftp(sftp):
+    """构造 SSHClient mock：open_sftp() 返回给定的 SFTPClient mock。"""
+    ssh = mock.Mock()
+    ssh.open_sftp.return_value = sftp
+    return ssh
+
+
 def test_session_alive_true():
-    client = _sftp_with_transport(True)
-    s = sp.SFTPSession(client)
+    s = sp.SFTPSession(_ssh_with_sftp(_sftp_with_transport(True)))
     assert m._session_alive(s) is True
 
 
 def test_session_alive_false():
-    client = _sftp_with_transport(False)
-    s = sp.SFTPSession(client)
+    s = sp.SFTPSession(_ssh_with_sftp(_sftp_with_transport(False)))
     assert m._session_alive(s) is False
 
 
@@ -45,10 +50,10 @@ def test_get_session_reconnects_if_dead(monkeypatch):
 
     dead = _sftp_with_transport(False)
     alive = _sftp_with_transport(True)
-    # 预置 dead 会话在池子里；重建时 _connect 应返回 alive
-    monkeypatch.setattr(m, "_connect", lambda bm: alive)
+    # 预置 dead 会话在池子里；重建时 _connect 应返回活连接
+    monkeypatch.setattr(m, "_connect", lambda bm: _ssh_with_sftp(alive))
 
-    pool._sessions["b1"] = sp.SFTPSession(dead)
+    pool._sessions["b1"] = sp.SFTPSession(_ssh_with_sftp(dead))
     got = m._get_session("b1")
     assert got.client is alive  # 死连接被换成活连接
     assert "b1" in pool._sessions
@@ -63,7 +68,7 @@ def test_get_session_reuses_alive(monkeypatch):
     monkeypatch.setattr(m.bookmarks, "get_bookmark", lambda bid: bm)
 
     alive = _sftp_with_transport(True)
-    pool._sessions["b1"] = sp.SFTPSession(alive)
+    pool._sessions["b1"] = sp.SFTPSession(_ssh_with_sftp(alive))
     got = m._get_session("b1")
     assert got.client is alive  # 复用，未重建
 
@@ -75,7 +80,7 @@ def test_with_reconnect_retries_once_on_disconnect(monkeypatch):
     bm = {"id": "b1", "host": "h", "port": 22, "username": "u",
           "auth_method": "key", "key_path": "~/.ssh/x"}
     monkeypatch.setattr(m.bookmarks, "get_bookmark", lambda bid: bm)
-    monkeypatch.setattr(m, "_connect", lambda bm: _sftp_with_transport(True))
+    monkeypatch.setattr(m, "_connect", lambda bm: _ssh_with_sftp(_sftp_with_transport(True)))
 
     calls = {"n": 0}
     def fn(s):
@@ -98,7 +103,7 @@ def test_with_reconnect_propagates_auth(monkeypatch):
     bm = {"id": "b1", "host": "h", "port": 22, "username": "u",
           "auth_method": "key", "key_path": "~/.ssh/x"}
     monkeypatch.setattr(m.bookmarks, "get_bookmark", lambda bid: bm)
-    monkeypatch.setattr(m, "_connect", lambda bm: _sftp_with_transport(True))
+    monkeypatch.setattr(m, "_connect", lambda bm: _ssh_with_sftp(_sftp_with_transport(True)))
 
     def fn(s):
         raise paramiko.AuthenticationException("bad auth")
@@ -115,7 +120,7 @@ def test_with_reconnect_propagates_notfound(monkeypatch):
     bm = {"id": "b1", "host": "h", "port": 22, "username": "u",
           "auth_method": "key", "key_path": "~/.ssh/x"}
     monkeypatch.setattr(m.bookmarks, "get_bookmark", lambda bid: bm)
-    monkeypatch.setattr(m, "_connect", lambda bm: _sftp_with_transport(True))
+    monkeypatch.setattr(m, "_connect", lambda bm: _ssh_with_sftp(_sftp_with_transport(True)))
 
     def fn(s):
         raise FileNotFoundError("no path")

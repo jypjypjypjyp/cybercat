@@ -25,7 +25,7 @@ def test_stub_server_roundtrip():
                    timeout=5, allow_agent=False, look_for_keys=False)
     sftp = client.open_sftp()
 
-    session = sp.SFTPSession(sftp)
+    session = sp.SFTPSession(client)
 
     # 列表
     r = ops.list_dir(session, "/")
@@ -57,5 +57,4 @@ def test_stub_server_roundtrip():
     ops.delete(session, "/newdir")
     assert not os.path.exists(os.path.join(root, "newdir"))
 
-    sftp.close()
     client.close()
