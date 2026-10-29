@@ -16,9 +16,13 @@
     sortKey: "name",   // name | mtime | size
     sortDir: "asc",    // asc | desc
     showHidden: true,  // 是否列出以 . 开头的隐藏项（记住上次选择）
+    transcodeDefault: false,  // 打开视频默认走转码流
+    videoUrl: "",             // 当前视频的直连地址
     theme: "light",
     checkAll: false,
     selectedSet: new Set(),  // 多选路径集合
+    deleteBusy: false,       // 删除进行中（只能点「取消」，避免误关弹层）
+    deleteAbort: null,       // 删除流的取消句柄
   };
 
   const $ = (sel) => document.querySelector(sel);
@@ -345,7 +349,7 @@
         </select>
         <button class="btn outline sm" id="sort-dir" title="升序" onclick="SFPM.toggleSortDir()">${state.sortDir==="asc"?"↑":"↓"} ${state.sortDir==="asc"?"升":"降"}</button>
         <button class="btn outline sm" title="返回顶部" onclick="SFPM.scrollTopList()">⤒ 返回顶部</button>
-        <span class="count">${visible.length} 项</span>
+        <span class="count" id="file-count">${visible.length} 项</span>
       </div>`;
 
     const selCount = state.selectedSet.size;
@@ -569,16 +573,179 @@
     } catch (e) { toast(e.message, "err"); }
   }
 
-  async function deleteItem(path) {
-    if (!confirm(`删除 ${path.split("/").pop()}？`)) return;
-    try {
-      await api("POST", `/api/bookmarks/${state.current.id}/delete?path=${encodeURIComponent(path)}`);
-      toast("已删除", "ok");
-      loadDir();
-    } catch (e) { toast(e.message, "err"); }
+  function back() { showBooks(); }
+
+  // ---------- 删除（流式进度） ----------
+  // 大文件夹/多选删除走一个 NDJSON 流：服务端边删边报数，前端可取消。
+  // 单项失败不影响其余项；取消/关页面时请求断开，服务端最多再删完当前一条。
+  function baseName(p) {
+    const parts = String(p || "").split("/").filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : "";
   }
 
-  function back() { showBooks(); }
+  function selectedEntries() {
+    return visibleEntries().filter((e) => state.selectedSet.has(e.path));
+  }
+
+  // 保持与当前排序一致：取 entries 中在 selectedSet 里的，目录优先
+  function selectedPaths() {
+    return selectedEntries().map((e) => e.path);
+  }
+
+  async function deleteItem(path) {
+    if (state.deleteBusy) return;
+    const e = state.entries.find((x) => x.path === path);
+    const name = baseName(path);
+    const msg = e && e.is_dir
+      ? `删除文件夹「${name}」？\n里面的所有内容会一起删除，且无法恢复。`
+      : `删除「${name}」？\n删除后无法恢复。`;
+    if (!confirm(msg)) return;
+    await runDelete([path]);
+  }
+
+  async function batchDelete() {
+    if (state.deleteBusy) return;
+    const entries = selectedEntries();
+    if (entries.length === 0) return;
+    const dirs = entries.filter((e) => e.is_dir).length;
+    const msg = `删除选中的 ${entries.length} 项${dirs ? `（含 ${dirs} 个文件夹，内部文件会一起删除）` : ""}？\n删除后无法恢复。`;
+    if (!confirm(msg)) return;
+    await runDelete(entries.map((e) => e.path));
+  }
+
+  // 总数未知（大文件夹边删边数），进度条用流动条纹表示仍在进行
+  function openDeleteProgress(total) {
+    openModal(`
+      <div class="modal-title">正在删除</div>
+      <div class="modal-body">
+        <div class="del-current" id="del-current">准备中…</div>
+        <div class="del-meter"><span></span></div>
+        <div class="del-count" id="del-count">已删除 0 个文件</div>
+        <div class="del-sub" id="del-sub">共 ${total} 项 · 大文件夹需要一些时间</div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn danger" id="del-cancel" onclick="SFPM.cancelDelete()">取消</button>
+      </div>`);
+  }
+
+  function paintDeleteProgress(stats) {
+    const c = $("#del-count");
+    if (c) c.textContent = `已删除 ${stats.files} 个文件${stats.dirs ? `、${stats.dirs} 个文件夹` : ""} · ${fmtSize(stats.bytes)}`;
+  }
+
+  function cancelDelete() {
+    if (!state.deleteBusy) return;
+    const btn = $("#del-cancel");
+    if (btn) { btn.disabled = true; btn.textContent = "正在停止…"; }
+    if (state.deleteAbort) state.deleteAbort.abort();
+  }
+
+  // 一项删完：行/选中集/计数即时更新，不等整批结束再刷列表
+  function forgetEntry(path) {
+    state.selectedSet.delete(path);
+    const before = state.entries.length;
+    state.entries = state.entries.filter((e) => e.path !== path);
+    const row = rowIndex.get(path);
+    if (row) { row.remove(); rowIndex.delete(path); }
+    if (state.entries.length === before) return;
+    const cnt = $("#file-count");
+    if (cnt) cnt.textContent = `${visibleEntries().length} 项`;
+    const visible = visibleEntries();
+    state.checkAll = visible.length > 0 && state.selectedSet.size === visible.length;
+    updateSelBar();
+  }
+
+  async function runDelete(paths) {
+    if (state.deleteBusy || paths.length === 0) return;
+    state.deleteBusy = true;
+    const ctrl = new AbortController();
+    state.deleteAbort = ctrl;
+    const total = paths.length;
+    const stats = { files: 0, dirs: 0, bytes: 0 };
+    const failed = [];
+    let cancelled = false;
+    openDeleteProgress(total);
+
+    try {
+      const res = await fetch(`/api/bookmarks/${state.current.id}/delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paths }),
+        signal: ctrl.signal,
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || `请求失败 (${res.status})`);
+      }
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          let ev;
+          try { ev = JSON.parse(line); } catch (_) { continue; }
+          if (ev.type === "progress" || ev.type === "done") {
+            stats.files = ev.files; stats.dirs = ev.dirs; stats.bytes = ev.bytes;
+            paintDeleteProgress(stats);
+          } else if (ev.type === "item_start") {
+            const cur = $("#del-current");
+            if (cur) cur.textContent = `正在删除：${baseName(ev.path)}`;
+            const sub = $("#del-sub");
+            if (sub) sub.textContent = total > 1 ? `第 ${ev.index}/${ev.total} 项` : "大文件夹需要一些时间";
+          } else if (ev.type === "item_done") {
+            if (ev.ok) forgetEntry(ev.path);
+            else if (ev.cancelled) cancelled = true;
+            else failed.push({ path: ev.path, error: ev.error || "未知错误" });
+          } else if (ev.type === "aborted") {
+            failed.push({ path: "", error: ev.error || "连接中断" });
+          } else if (ev.type === "done") {
+            cancelled = cancelled || !!ev.cancelled;
+          }
+        }
+      }
+    } catch (e) {
+      if (e.name === "AbortError") cancelled = true;
+      else failed.push({ path: "", error: e.message || String(e) });
+    } finally {
+      state.deleteBusy = false;
+      state.deleteAbort = null;
+      finishDelete(stats, failed, cancelled);
+    }
+  }
+
+  function finishDelete(stats, failed, cancelled) {
+    const summary = `已删除 ${stats.files} 个文件${stats.dirs ? `、${stats.dirs} 个文件夹` : ""} · ${fmtSize(stats.bytes)}`;
+    if (!failed.length && !cancelled) {
+      closeModal();
+      toast(summary, "ok");
+      if (rowIndex.size === 0) renderBrowser();   // 整页删空：显示空目录提示
+      return;
+    }
+    const shown = failed.slice(0, 20);
+    const rest = failed.length - shown.length;
+    const listHtml = shown.map((f) => {
+      const name = baseName(f.path);
+      return `<div>${name ? escapeHtml(name) + "：" : ""}${escapeHtml(f.error || "")}</div>`;
+    }).join("");
+    openModal(`
+      <div class="modal-title">${cancelled ? "已取消删除" : "删除未全部完成"}</div>
+      <div class="modal-body">
+        <div>${escapeHtml(summary)}</div>
+        ${failed.length ? `<div class="del-sub">${failed.length} 项未删除：</div>
+          <div class="del-fails">${listHtml}${rest > 0 ? `<div>…还有 ${rest} 项</div>` : ""}</div>` : ""}
+        ${cancelled ? `<div class="del-sub">取消后剩余内容保留，已删掉的不会恢复。</div>` : ""}
+      </div>
+      <div class="modal-foot"><button class="btn primary" onclick="SFPM.closeModal()">知道了</button></div>`);
+    // 失败/取消的目录可能只删了一半：重新列一次，让界面和服务器一致
+    loadDir();
+  }
 
   // ---------- 隐藏项 ----------
   // 判据：名字以「.」开头。后端照旧返回全目录，这里只决定显示哪些，切换零网络往返。
@@ -663,23 +830,6 @@
     }
     updateSelBar();
   }
-  function selectedPaths() {
-    // 保持与当前排序一致：取 entries 中在 selectedSet 里的，目录优先
-    const all = visibleEntries().filter(e => state.selectedSet.has(e.path));
-    return all.map(e => e.path);
-  }
-  async function batchDelete() {
-    const paths = selectedPaths();
-    if (paths.length === 0) return;
-    if (!confirm(`删除选中的 ${paths.length} 项？`)) return;
-    for (const p of paths) {
-      try { await api("POST", `/api/bookmarks/${state.current.id}/delete?path=${encodeURIComponent(p)}`); }
-      catch (e) { toast(`删除 ${p} 失败: ${e.message}`, "err"); }
-    }
-    state.selectedSet.clear(); state.checkAll = false;
-    toast(`已删除 ${paths.length} 项`, "ok");
-    loadDir();
-  }
   async function batchDownload() {
     const paths = selectedPaths().filter(p => !state.entries.find(e => e.path === p)?.is_dir);
     if (paths.length === 0) { toast("请选择要下载的文件", "err"); return; }
@@ -702,7 +852,7 @@
   const PREVIEW_MAX_MB = 512;                   // 超过就不预览；后端同一个上限，这边只是早一步拦住
 
   const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico", "svg"]);
-  const VIDEO_EXT = new Set(["mp4", "m4v", "webm", "ogv", "mov"]);
+  const VIDEO_EXT = new Set(["mp4", "m4v", "webm", "ogv", "mov", "mkv", "avi"]);
   const AUDIO_EXT = new Set(["mp3", "wav", "ogg", "oga", "opus", "flac", "m4a", "aac"]);
   const PDF_EXT = new Set(["pdf"]);
   const TEXT_EXT = new Set(["txt", "text", "log", "md", "markdown", "rst", "csv", "tsv", "ini", "conf", "cfg", "env",
@@ -755,6 +905,7 @@
           <span class="preview-name" title="${escapeAttr(name)}">${escapeHtml(name)}</span>
           <span class="preview-meta">${fmtSize(size)} · ${KIND_LABEL[kind] || "文件"}</span>
           <div class="spacer" style="flex:1"></div>
+          ${kind === "video" ? `<button class="btn outline sm" id="preview-transcode" onclick="SFPM.toggleVideoSource()">转码播放</button>` : ""}
           <button class="btn outline sm" onclick="SFPM.downloadOne('${escapeAttrSingle(previewPath || "")}')">下载</button>
           <button class="btn sm" onclick="SFPM.closePreview()">关闭</button>
         </div>
@@ -764,7 +915,14 @@
         <div class="veil-card">
           <div class="veil-name" title="${escapeAttr(name)}">${escapeHtml(name)}</div>
           <div class="veil-meta">${fmtSize(size)} · ${KIND_LABEL[kind] || "文件"}</div>
-          <div class="veil-bar${determinate ? "" : " indeterminate"}"><i id="veil-fill"></i></div>
+          ${determinate
+            ? `<div class="veil-bar"><i id="veil-fill"></i></div>`
+            : `<div class="veil-spinner" role="status" aria-label="正在准备">
+                 <svg viewBox="0 0 32 32" aria-hidden="true">
+                   <circle class="track" cx="16" cy="16" r="14"/>
+                   <circle class="arc" cx="16" cy="16" r="14"/>
+                 </svg>
+               </div>`}
           <div class="veil-hint" id="veil-hint">${determinate ? "正在读取…" : "正在读取媒体信息…"}</div>
           <button class="btn outline" id="veil-cancel" onclick="SFPM.cancelPreview()">取消预览</button>
         </div>
@@ -811,25 +969,106 @@
     if (previewSlowTimer) { clearTimeout(previewSlowTimer); previewSlowTimer = null; }
     const hint = $("#veil-hint");
     if (hint) { hint.className = "veil-hint err"; hint.textContent = msg; }
-    const bar = $("#preview-veil .veil-bar");
+    const bar = $("#preview-veil .veil-bar, #preview-veil .veil-spinner");
     if (bar) bar.remove();
     const btn = $("#veil-cancel");
     if (btn) { btn.textContent = "关闭"; btn.onclick = () => SFPM.closePreview(); }
   }
 
+  // 白膜已经揭开后的提示：贴在视频上方，不打断播放
+  function clearPreviewNotice() {
+    const d = $("#preview-hint");
+    if (d) d.remove();
+  }
+
+  function previewNotice(msg) {
+    const body = $("#preview-body");
+    if (!body || $("#preview-hint")) return;
+    const d = document.createElement("div");
+    d.id = "preview-hint";
+    d.className = "preview-notice";
+    d.textContent = msg;
+    body.prepend(d);
+  }
+
+  // 换视频源：direct 直连原文件，transcode 实时转码流
+  function transcodeUrl() {
+    return `/api/bookmarks/${state.current.id}/transcode?path=${encodeURIComponent(previewPath)}`;
+  }
+
+  // 准备远端 ffmpeg，失败时返回原因
+  async function probeTranscode() {
+    try {
+      const res = await fetch(`${transcodeUrl()}&probe=1`);
+      if (res.ok) return { ok: true };
+      const j = await res.json().catch(() => ({}));
+      return { ok: false, msg: j.detail || `准备转码失败（HTTP ${res.status}）` };
+    } catch (e) {
+      return { ok: false, msg: `准备转码失败：${e.message}` };
+    }
+  }
+
+  function attachVideoListeners(v, token, tr, btn) {
+    if (typeof v._onCanplay === "function") v.removeEventListener("canplay", v._onCanplay);
+    if (typeof v._onError === "function") v.removeEventListener("error", v._onError);
+    v._onCanplay = () => {
+      if (token !== previewSeq) return;
+      if (tr) clearPreviewNotice();   // 开始播放后收起提示
+      liftVeil();
+      v.play().catch(() => { /* 自动播放被拦：用户按播放键即可 */ });
+    };
+    v._onError = () => {
+      if (token !== previewSeq) return;
+      if (!tr) {
+        previewFailed("这个视频的编码浏览器播不了：点右上角「转码播放」或「下载」");
+        return;
+      }
+      if (btn) btn.textContent = "重试转码";
+      previewNotice("转码流没起来，正在查原因…");
+      // 单独探一次，把服务器给的原因显示出来
+      probeTranscode().then((r) => {
+        if (token !== previewSeq || v._source !== "transcode") return;
+        previewNotice(r.ok ? "转码流断了，点「重试转码」再来一次，或「直连播放」看原文件。" : r.msg);
+      });
+    };
+    v.addEventListener("canplay", v._onCanplay, { once: true });
+    v.addEventListener("error", v._onError, { once: true });
+  }
+
+  function useVideoSource(v, source, token) {
+    const btn = $("#preview-transcode");
+    const tr = source === "transcode";
+    v._source = source;            // 当前源（direct / transcode）
+    if (!tr) {
+      clearPreviewNotice();
+      if (btn) { btn.textContent = "转码播放"; btn.disabled = false; }
+      attachVideoListeners(v, token, false, btn);
+      v.src = state.videoUrl;
+      return;
+    }
+    if (btn) { btn.textContent = "直连播放"; btn.disabled = false; }
+    const hint = $("#veil-hint");
+    if (hint && !hint.classList.contains("err")) hint.textContent = "正在准备转码流…";
+    attachVideoListeners(v, token, true, btn);
+    v.src = transcodeUrl();
+  }
+
+  // 顶栏按钮：在「转码播放」和「直连播放」之间切换
+  function toggleVideoSource() {
+    if (!previewMedia) return;
+    const btn = $("#preview-transcode");
+    const toTranscode = !(btn && (btn.textContent === "直连播放" || btn.textContent === "重试转码"));
+    useVideoSource(previewMedia, toTranscode ? "transcode" : "direct", previewSeq);
+  }
+
   function loadVideo(url, name, size, token) {
     const v = document.createElement("video");
     v.className = "preview-media"; v.controls = true; v.playsInline = true;
-    v.preload = "metadata";    // 靠 preload 触发加载：autoplay 被策略挡掉时不一定开始下载
+    v.preload = "auto";        // 提前缓冲整段
     previewMedia = v;
+    state.videoUrl = url;
     appendPreviewBody(v, true);   // 必须在设 src 前进文档，游离的媒体元素不会开始加载
-    v.addEventListener("loadedmetadata", () => {
-      if (token !== previewSeq) return;
-      liftVeil();
-      v.play().catch(() => { /* 自动播放被拦：用户按播放键即可 */ });
-    }, { once: true });
-    v.addEventListener("error", () => { if (token === previewSeq) previewFailed("这个视频的编码浏览器播不了，可以点右上角「下载」用本地播放器打开"); }, { once: true });
-    v.src = url;
+    useVideoSource(v, state.transcodeDefault ? "transcode" : "direct", token);
   }
 
   function loadAudio(src, name, size, token) {
@@ -1046,6 +1285,7 @@
   function cancelPreview() { closePreview(); }
 
   function dismissModal() {
+    if (state.deleteBusy) return;   // 删除进行中只能点「取消」，避免误关弹层以为已停
     if ($("#modal").classList.contains("preview")) closePreview();
     else closeModal();
   }
@@ -1064,6 +1304,77 @@
   function initTheme() {
     const saved = localStorage.getItem("cybercat_theme") || "light";
     state.theme = saved; applyTheme(saved);
+  }
+
+  // ---------- 设置 ----------
+  let settingsFields = [];
+
+  async function openSettings() {
+    if ($("#modal").classList.contains("preview")) closePreview();
+    let data;
+    try {
+      data = await api("GET", "/api/settings");
+    } catch (e) {
+      toast(e.message, "err");
+      return;
+    }
+    settingsFields = data.fields || [];
+    const rows = settingsFields.map((f) => {
+      const id = `set-${f.key}`;
+      let input;
+      if (f.type === "bool") {
+        input = `<input type="checkbox" id="${id}" ${data.values[f.key] ? "checked" : ""}>`;
+      } else if (f.type === "choice") {
+        input = `<select id="${id}">${f.choices.map((c) =>
+          `<option value="${c}" ${String(c) === String(data.values[f.key]) ? "selected" : ""}>${c}</option>`).join("")}</select>`;
+      } else {
+        input = `<input type="number" id="${id}" value="${data.values[f.key]}" min="${f.min}" max="${f.max}" step="1">`;
+      }
+      return `<div class="field set-field">
+        <label for="${id}">${escapeHtml(f.label)}${f.unit ? `（${escapeHtml(f.unit)}）` : ""}</label>
+        ${input}
+        ${f.help ? `<div class="set-help">${escapeHtml(f.help)}</div>` : ""}
+      </div>`;
+    }).join("");
+    const m = $("#modal");
+    m.classList.remove("preview");
+    m.innerHTML = `<div class="modal-card settings-card">
+      <div class="modal-title">设置</div>
+      <div class="modal-body settings-body">${rows}</div>
+      <div class="modal-foot">
+        <button class="btn outline" onclick="SFPM.closeModal()">取消</button>
+        <button class="btn primary" onclick="SFPM.saveSettings()">保存</button>
+      </div>
+    </div>`;
+    m.classList.remove("hidden");
+  }
+
+  // 启动时读设置
+  async function loadSettings() {
+    try {
+      const j = await api("GET", "/api/settings");
+      state.transcodeDefault = !!j.values.transcode_default;
+    } catch (e) { /* 读不到按直连 */ }
+  }
+
+  async function saveSettings() {
+    const patch = {};
+    for (const f of settingsFields) {
+      const el = $(`#set-${f.key}`);
+      if (!el) continue;
+      if (f.type === "bool") patch[f.key] = el.checked;
+      else if (f.type === "choice") patch[f.key] = typeof f.choices[0] === "number" ? Number(el.value) : el.value;
+      else patch[f.key] = Number(el.value);
+    }
+    try {
+      const data = await api("PUT", "/api/settings", patch);
+      state.transcodeDefault = !!data.values.transcode_default;
+      settingsFields = [];
+      closeModal();
+      toast("设置已保存", "ok");
+    } catch (e) {
+      toast(e.message, "err");
+    }
   }
 
   // ---------- 模态框 ----------
@@ -1101,6 +1412,7 @@
 
   // ---------- 事件绑定 ----------
   function bind() {
+    $("#btn-settings").onclick = openSettings;
     $("#btn-home").onclick = showBooks;
     $("#theme-toggle").onclick = toggleTheme;
     $("#zoom-in").onclick = () => zoom(0.1);
@@ -1131,13 +1443,14 @@
     goto, goUp, openDir, editPath, newDir, uploadFile, downloadOne, renameItem, deleteItem, back,
     setSort, toggleSortDir, toggleCheck, toggleCheckAll, batchDelete, batchDownload,
     scrollTopList, toggleHidden,
-    previewFile, closePreview, cancelPreview,
+    previewFile, closePreview, cancelPreview, toggleVideoSource,
+    openSettings, saveSettings,
     toggleTheme,
-    closeModal,
+    closeModal, cancelDelete,
   };
   bind();
   initScale();
   initTheme();
   initHidden();
-  loadBookmarks().then(() => parseUrlOnLoad());
+  loadSettings().then(() => loadBookmarks()).then(() => parseUrlOnLoad());
 })();

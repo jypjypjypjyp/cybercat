@@ -1,6 +1,8 @@
 """预览：Content-Type / inline / Range 语义 / 目录与不存在文件 / 预览通道不占传输闸门。"""
 import asyncio
 import os
+import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,6 +14,7 @@ import app.session_pool as sp
 from tests.sftp_stub_server import run_sftp_server
 
 PAYLOAD = bytes(range(256)) * 4  # 1024 字节，内容可校验
+BIG = 4 * 1024 * 1024           # 通道/并行读用的固定大小文件
 
 
 # ---------- 纯函数：扩展名 → MIME ----------
@@ -127,6 +130,17 @@ def test_preview_text_mime(stub):
     assert r.content == b"print('hi')\n"
 
 
+def test_preview_cache_control_by_type(stub):
+    """音视频允许浏览器复用分片，其余预览一律不缓存。"""
+    client, root = stub
+    with open(os.path.join(root, "v.mp4"), "wb") as f:
+        f.write(PAYLOAD)
+    video = client.get("/api/bookmarks/t/preview", params={"path": "/v.mp4"})
+    image = client.get("/api/bookmarks/t/preview", params={"path": "/pic.png"})
+    assert video.headers["cache-control"] == "private, max-age=300"
+    assert image.headers["cache-control"] == "no-store"
+
+
 def test_preview_range_head(stub):
     client, _root = stub
     r = client.get("/api/bookmarks/t/preview", params={"path": "/pic.png"},
@@ -188,7 +202,7 @@ def session(monkeypatch):
     monkeypatch.setattr("app.config.PREFETCH", False)
     port, root, _key = run_sftp_server()
     with open(os.path.join(root, "big.bin"), "wb") as f:
-        f.write(b"x" * (4 * 1024 * 1024))
+        f.write(b"x" * BIG)
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.connect(hostname="127.0.0.1", port=port, username="user", password="pass",
@@ -198,16 +212,19 @@ def session(monkeypatch):
     s.close()
 
 
-def test_preview_channel_is_separate_and_reused(session):
-    p1 = session.preview_client()
-    assert p1 is not session.client
-    assert p1 is not session.transfer_client()
-    assert session.preview_client() is p1
+def test_preview_lanes_are_separate_channels(session):
+    a = session.open_preview_lane()
+    b = session.open_preview_lane()
+    assert a is not b
+    assert a is not session.client
+    assert a is not session.transfer_client()
+    a.close()
+    b.close()
 
 
 def test_preview_stream_keeps_transfer_lane_free(session):
     """预览流进行中，下载必须还能开（否则一边看视频一边下载会卡住）。"""
-    gen = m._preview_chunks(session, "/big.bin", 0, None)
+    gen = m._preview_chunks(session, "/big.bin", 0, None, BIG)
     assert next(gen)
 
     assert session.transfer_gate.acquire(timeout=1.0), "预览占住了传输闸门"
@@ -222,7 +239,7 @@ def test_preview_stream_keeps_transfer_lane_free(session):
 def test_preview_abort_releases_lane(session):
     """客户端取消预览（关窗/按取消）后，预览闸门必须立刻放开。"""
     async def run():
-        agen = m._stream_preview(session, "/big.bin", 0, None)
+        agen = m._stream_preview(session, "/big.bin", 0, None, BIG)
         assert await agen.__anext__()
         await agen.aclose()
 
@@ -231,14 +248,44 @@ def test_preview_abort_releases_lane(session):
     assert session.preview_gate.acquire(timeout=1.0), "取消后预览闸门没释放"
     session.preview_gate.release()
 
-    gen = m._preview_chunks(session, "/big.bin", 0, None)
+    gen = m._preview_chunks(session, "/big.bin", 0, None, BIG)
     assert next(gen)  # 取消之后还能再预览
     gen.close()
 
 
 def test_preview_chunks_seek_and_bound(session):
     """带 start/end 的小范围读：内容和长度都要对。"""
-    chunks = list(m._preview_chunks(session, "/big.bin", 1024, 1024 + 99))
+    chunks = list(m._preview_chunks(session, "/big.bin", 1024, 1024 + 99, BIG))
     body = b"".join(chunks)
     assert len(body) == 100
     assert body == b"x" * 100
+
+
+def test_preview_chunks_parallel_blocks(session, monkeypatch):
+    """跨多块读：内容完整，且确实开了多条通道并行读。"""
+    monkeypatch.setattr(config, "PREVIEW_LANES", 4)   # 不受本机设置文件影响
+    opened = []
+    real = session.open_preview_lane
+    monkeypatch.setattr(session, "open_preview_lane", lambda: opened.append(1) or real())
+    body = b"".join(m._preview_chunks(session, "/big.bin", 0, BIG - 1, BIG))
+    assert len(body) == BIG
+    assert body == b"x" * BIG
+    assert len(opened) > 1
+
+
+def test_preview_abort_leaves_no_reader_threads(session):
+    """提前关掉预览：并行读的线程必须收干净，不留后台线程。"""
+    gen = m._preview_chunks(session, "/big.bin", 0, None, BIG)
+    next(gen)
+    gen.close()
+    time.sleep(0.1)
+    assert not [t for t in threading.enumerate() if t.name == "preview-lane"]
+
+
+def test_preview_stream_touches_session(session):
+    """读数据时续活跃时间：播放期间没有别的请求，不续就会被空闲回收掐断。"""
+    session.last_used = 0
+    gen = m._preview_chunks(session, "/big.bin", 0, None, BIG)
+    next(gen)
+    gen.close()
+    assert session.last_used > 0

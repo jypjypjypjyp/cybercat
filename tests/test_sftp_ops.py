@@ -2,6 +2,8 @@ import posixpath
 import threading
 from unittest import mock
 
+import pytest
+
 import app.sftp_ops as ops
 
 
@@ -83,21 +85,45 @@ def test_mkdir_and_rename_call_client():
     s.client.rename.assert_called_once_with("/a", "/b")
 
 
-def test_delete_recursive_dir():
+def test_delete_recursive_dir_reports_each_item():
+    """递归删：目录先 rmdir 试探（非空则列子项），子项按 lstat 判类型后删除。
+
+    进度事件每删掉一项来一条，前端靠它报数。
+    """
     s = _mk_session()
     from paramiko import SFTPAttributes
     d = SFTPAttributes(); d.st_mode = 0o040755
-    f = SFTPAttributes(); f.st_mode = 0o100644
-    def stat_side(p):
-        return d if p == "/home/u/dir" else f
-    s.client.stat.side_effect = stat_side
-    s.client.listdir.return_value = ["x.txt"]
-    s.client.rmdir.side_effect = [OSError("not empty"), None, None]  # 首次非空触发递归，后续成功
-    ops.delete(s, "/home/u/dir")
-    # stat 被调用：先目录，再 x.txt
-    s.client.stat.assert_any_call("/home/u/dir")
-    s.client.stat.assert_any_call("/home/u/dir/x.txt")
+    f = SFTPAttributes(); f.st_mode = 0o100644; f.st_size = 7
+    s.client.lstat.side_effect = lambda p: d if p == "/home/u/dir" else f
+    s.client.listdir_attr.return_value = [f]
+    f.filename = "x.txt"
+    s.client.rmdir.side_effect = [OSError("not empty"), None]   # 首次非空触发递归，删完后再删
+    events = list(ops.delete_tree(s, "/home/u/dir"))
+    s.client.listdir_attr.assert_called_once_with("/home/u/dir")
     s.client.remove.assert_called_once_with("/home/u/dir/x.txt")
+    assert events == [(False, 7), (True, 0)]
+
+
+def test_delete_tree_stops_when_cancelled():
+    """取消位已置时一个 SFTP 操作都不做。"""
+    s = _mk_session()
+    stop = threading.Event()
+    stop.set()
+    with pytest.raises(ops.DeleteCancelled):
+        list(ops.delete_tree(s, "/home/u/dir", stop))
+    s.client.lstat.assert_not_called()
+
+
+def test_delete_empty_dir_single_rmdir():
+    """空目录不列子项：一次 rmdir 就够。"""
+    s = _mk_session()
+    from paramiko import SFTPAttributes
+    d = SFTPAttributes(); d.st_mode = 0o040755
+    s.client.lstat.return_value = d
+    events = list(ops.delete_tree(s, "/home/u/empty"))
+    s.client.rmdir.assert_called_once_with("/home/u/empty")
+    s.client.listdir_attr.assert_not_called()
+    assert events == [(True, 0)]
 
 
 def test_stat():

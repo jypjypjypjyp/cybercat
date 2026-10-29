@@ -18,5 +18,15 @@ PREFETCH = os.environ.get("CYBERCAT_PREFETCH", "1") not in ("0", "false", "no", 
 PREFETCH_CONCURRENCY = int(os.environ.get("CYBERCAT_PREFETCH_CONCURRENCY", "8"))
 # 预览大小上限：超过就不预览（一个字节都不读），提示下载后查看
 PREVIEW_MAX_BYTES = 512 * 1024 * 1024
+# 预览并行读的通道数：越多越快，也更压服务器
+PREVIEW_LANES = int(os.environ.get("CYBERCAT_PREVIEW_LANES", "4"))
+# 实时转码：输出高度上限、画质（crf 越大越糊）、编码速度档
+TRANSCODE_HEIGHT = int(os.environ.get("CYBERCAT_TRANSCODE_HEIGHT", "720"))
+TRANSCODE_CRF = int(os.environ.get("CYBERCAT_TRANSCODE_CRF", "28"))
+TRANSCODE_PRESET = os.environ.get("CYBERCAT_TRANSCODE_PRESET", "veryfast")
+# 打开视频时默认走转码流
+TRANSCODE_DEFAULT = os.environ.get("CYBERCAT_TRANSCODE_DEFAULT", "0") == "1"
+# 本机现成的可移植 ffmpeg；不填则下载官方静态构建到缓存
+FFMPEG_PORTABLE = os.environ.get("CYBERCAT_FFMPEG_PORTABLE", "")
 # 顶栏链接状态的「活跃窗口」秒数：会话在这个时间内碰过显示「已连接」，超过则显示「空闲」
 ACTIVE_WINDOW_SECONDS = 60.0

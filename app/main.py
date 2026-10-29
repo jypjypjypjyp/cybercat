@@ -1,6 +1,9 @@
 import asyncio
+import json
 import os
 import posixpath
+import threading
+import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
@@ -15,9 +18,13 @@ import app.bookmarks as bookmarks
 import app.config as config
 import app.preview as preview
 import app.sftp_ops as sfops
+import app.settings as settings
 import app.sync as syncer
+import app.transcode as transcode
 from app.keychain import get_password, set_password, delete_password
 from app.session_pool import SessionPool
+
+settings.load()
 
 pool = SessionPool()
 
@@ -102,6 +109,7 @@ def _get_session(bid):
     if not _session_alive(s):
         pool.dispose(bid)
         s = pool.get_session(bid, connect_cb=lambda _: _connect(bm))
+    transcode.warm(s)   # 后台探测 ffmpeg，首次转码少等一次
     return s
 
 
@@ -258,14 +266,101 @@ def rename(bid: str, old: str, new: str):
         raise HTTPException(500, f"重命名失败: {e}")
 
 
-@app.post("/api/bookmarks/{bid}/delete")
-def delete(bid: str, path: str):
+class DeleteIn(BaseModel):
+    paths: list[str]
+
+
+DELETE_TICK = 0.15   # 进度事件最短间隔（秒）：再密只是白占带宽
+
+
+def _ndjson(obj):
+    return json.dumps(obj, ensure_ascii=False) + "\n"
+
+
+def _err_text(e):
+    """把常见系统错误翻成一句人话；其余原样带上，方便排查。"""
+    if getattr(e, "errno", None) in (1, 13):      # EPERM / EACCES
+        return "权限不足"
+    return str(e)
+
+
+def _delete_stream(session, paths, stop):
+    """逐项删除，边删边发 NDJSON 事件。
+
+    单项失败不影响其余项；连接真断了才整体停下（后面每项都必然失败）。
+    计数在服务端累计，前端只负责显示，不需要自己数。
+    """
+    files = dirs = freed = 0
+    failed = []
+    last = 0.0
+    total = len(paths)
+    yield _ndjson({"type": "start", "total": total})
+    for idx, path in enumerate(paths, 1):
+        if stop.is_set():
+            break
+        yield _ndjson({"type": "item_start", "index": idx, "total": total, "path": path})
+        try:
+            for is_dir, size in sfops.delete_tree(session, path, stop):
+                if is_dir:
+                    dirs += 1
+                else:
+                    files += 1
+                    freed += size
+                now = time.time()
+                if now - last >= DELETE_TICK:
+                    last = now
+                    yield _ndjson({"type": "progress", "files": files, "dirs": dirs,
+                                   "bytes": freed, "path": path})
+            yield _ndjson({"type": "item_done", "index": idx, "path": path, "ok": True})
+        except sfops.DeleteCancelled:
+            yield _ndjson({"type": "item_done", "index": idx, "path": path,
+                           "ok": False, "cancelled": True})
+            break
+        except FileNotFoundError:
+            # 删到一半被别人/另一批删掉了：结果与成功一致
+            yield _ndjson({"type": "item_done", "index": idx, "path": path,
+                           "ok": True, "missing": True})
+        except Exception as e:
+            failed.append({"path": path, "error": _err_text(e)})
+            yield _ndjson({"type": "item_done", "index": idx, "path": path,
+                           "ok": False, "error": _err_text(e)})
+            if isinstance(e, (paramiko.SSHException, EOFError)):
+                yield _ndjson({"type": "aborted", "error": "连接中断，已停止"})
+                break
+    yield _ndjson({"type": "done", "files": files, "dirs": dirs, "bytes": freed,
+                   "failed": failed, "cancelled": stop.is_set()})
+
+
+async def _delete_body(session, paths, stop):
+    """同步删除流包成异步；浏览器断开（点取消/关页面）时置取消位并收掉生成器。
+
+    删除逐条检查取消位，断开后最多再删完当前一条。
+    """
+    gen = _delete_stream(session, paths, stop)
     try:
-        return _with_reconnect(bid, lambda s: sfops.delete(s, path), "删除")
+        async for line in iterate_in_threadpool(gen):
+            yield line
+    finally:
+        stop.set()
+        try:
+            gen.close()
+        except (RuntimeError, ValueError):
+            pass    # 生成器还在线程池里跑当前一条：取消位已置，它出来后会自己收尾
+
+
+@app.post("/api/bookmarks/{bid}/delete")
+def delete(bid: str, req: DeleteIn):
+    try:
+        s = _get_session(bid)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(500, f"删除失败: {e}")
+    return StreamingResponse(
+        _delete_body(s, req.paths, threading.Event()),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 def _stream_download(session, path):
@@ -319,42 +414,155 @@ def download(bid: str, path: str):
         raise HTTPException(500, f"下载失败: {e}")
 
 
-def _preview_chunks(session, path, start, end):
-    """预览流：走预览通道（不占传输闸门），从 start 读到 end（含端点）。
+PREVIEW_BLOCK = 256 * 1024      # 预览每次递给浏览器的分片大小
 
-    不开预取：预览是小范围随机读，流水线没收益；而且 paramiko 的 prefetch 在
-    提前 close 时会漏一个常驻后台线程（预览开关频繁，正好踩这个坑）。
-    """
+
+def _preview_chunks(session, path, start, end, size):
+    """预览流：从 start 读到 end（含端点），按块分给多条通道并行读。"""
+    total = size - start if end is None else end - start + 1
+    if total <= 0:
+        return
+    blocks = (total + PREVIEW_BLOCK - 1) // PREVIEW_BLOCK
+
     with session.preview_gate:
-        f = session.preview_client().open(path, "rb")
+        pairs = []
+        err = None
+        for _ in range(min(config.PREVIEW_LANES, blocks)):
+            client = None
+            try:
+                client = session.open_preview_lane()
+                pairs.append((client, client.open(path, "rb")))
+            except Exception as exc:
+                err = exc
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+                break
+        if not pairs:
+            raise err
+        cond = threading.Condition()
+        stop = threading.Event()
+        buf = {}            # 块序号 → 数据（或异常）
+        issued = 0          # 已派发的块数
+        sent = 0            # 已下发的块数
+        alive = len(pairs)  # 还在读的通道数
+
+        def lane(client, f):
+            nonlocal issued, alive
+            try:
+                while True:
+                    with cond:
+                        while not stop.is_set() and issued - sent >= len(pairs):
+                            cond.wait()
+                        if stop.is_set() or issued >= blocks:
+                            return
+                        idx = issued
+                        issued += 1
+                    off = idx * PREVIEW_BLOCK
+                    want = min(PREVIEW_BLOCK, total - off)
+                    try:
+                        f.seek(start + off)
+                        data = f.read(want)
+                    except Exception as exc:
+                        data = exc
+                    with cond:
+                        buf[idx] = data
+                        cond.notify_all()
+                    if isinstance(data, Exception) or len(data) < want:
+                        return
+            finally:
+                with cond:
+                    alive -= 1
+                    cond.notify_all()
+                for res in (f, client):
+                    try:
+                        res.close()
+                    except Exception:
+                        pass
+
+        threads = [threading.Thread(target=lane, args=p, daemon=True, name="preview-lane") for p in pairs]
         try:
-            if start:
-                f.seek(start)
-            remaining = None if end is None else end - start + 1
-            while remaining is None or remaining > 0:
-                want = 256 * 1024 if remaining is None else min(256 * 1024, remaining)
-                chunk = f.read(want)
-                if not chunk:
-                    break
-                if remaining is not None:
-                    remaining -= len(chunk)
-                yield chunk
+            for t in threads:
+                t.start()
+            while True:
+                with cond:
+                    while sent not in buf and alive:
+                        cond.wait()
+                    if sent not in buf:
+                        return
+                    data = buf.pop(sent)
+                    idx, sent = sent, sent + 1
+                    cond.notify_all()
+                if isinstance(data, Exception):
+                    raise data
+                session.touch()   # 每发一块续一次活跃时间
+                yield data
+                if len(data) < min(PREVIEW_BLOCK, total - idx * PREVIEW_BLOCK):
+                    return
         finally:
-            f.close()
+            with cond:
+                stop.set()
+                cond.notify_all()
+            for t in threads:
+                if t.ident is not None:      # 没起来的线程不能 join
+                    t.join(timeout=2)
 
 
-async def _stream_preview(session, path, start, end):
+async def _stream_preview(session, path, start, end, size):
     """异步包装：客户端关掉预览（或按取消）时必须立刻关掉同步生成器。
 
     同 _stream_body 的理由：Starlette 的 iterate_in_threadpool 不等生成器收尾，
     少了这层，取消后预览闸门会一直被占，同书签后续预览全部卡死。
     """
-    gen = _preview_chunks(session, path, start, end)
+    gen = _preview_chunks(session, path, start, end, size)
     try:
         async for chunk in iterate_in_threadpool(gen):
             yield chunk
     finally:
         gen.close()
+
+
+async def _stream_transcode(first, gen):
+    """异步包装：浏览器关掉预览时立刻关掉同步生成器，远端 ffmpeg 随之退出。"""
+    try:
+        yield first
+        async for chunk in iterate_in_threadpool(gen):
+            yield chunk
+    finally:
+        gen.close()
+
+
+@app.get("/api/bookmarks/{bid}/transcode")
+def transcode_preview(bid: str, path: str, start: float = 0.0, probe: bool = False):
+    """实时转码：远端 ffmpeg 降码率后边转边发（不落盘；分片 MP4，不能拖动）。
+
+    probe=1 只做准备并回 JSON，供前端显示失败原因。
+    """
+    try:
+        s = _get_session(bid)
+        info = sfops.stat(s, path)
+        if info["is_dir"]:
+            raise HTTPException(400, "目录不能转码")
+        if probe:
+            return {"ok": True, "ffmpeg": transcode.ensure_ffmpeg(s)}
+        first, gen = transcode.open_stream(s, path, start)
+        return StreamingResponse(
+            _stream_transcode(first, gen), media_type="video/mp4",
+            headers={"Cache-Control": "no-store", "Content-Disposition": "inline"},
+        )
+    except HTTPException:
+        raise
+    except transcode.TranscodeError as e:
+        raise HTTPException(500, f"转码失败: {e}")
+    except FileNotFoundError:
+        raise HTTPException(404, "文件不存在")
+    except paramiko.SSHException as e:
+        pool.dispose(bid)
+        raise HTTPException(500, f"连接中断: {e}")
+    except Exception as e:
+        raise HTTPException(500, f"转码失败: {e}")
 
 
 @app.get("/api/bookmarks/{bid}/preview")
@@ -373,9 +581,11 @@ def preview_file(bid: str, path: str, request: Request):
             )
         mime = preview.guess_mime(path)
         name = posixpath.basename(path)
+        # 音视频允许浏览器复用缓存，其余预览不缓存
+        cache = "private, max-age=300" if mime.startswith(("video/", "audio/")) else "no-store"
         headers = {
             "Accept-Ranges": "bytes",
-            "Cache-Control": "no-store",
+            "Cache-Control": cache,
             "Content-Disposition": f'inline; filename="{name}"',
         }
         if mime == "image/svg+xml":
@@ -388,12 +598,12 @@ def preview_file(bid: str, path: str, request: Request):
             raise HTTPException(416, "范围不可满足", headers=headers)
         if rng is None:
             return StreamingResponse(
-                _stream_preview(s, path, 0, None), media_type=mime,
+                _stream_preview(s, path, 0, None, size), media_type=mime,
                 headers={**headers, "Content-Length": str(size)},
             )
         start, end = rng
         return StreamingResponse(
-            _stream_preview(s, path, start, end), status_code=206, media_type=mime,
+            _stream_preview(s, path, start, end, size), status_code=206, media_type=mime,
             headers={**headers, "Content-Range": f"bytes {start}-{end}/{size}",
                      "Content-Length": str(end - start + 1)},
         )
@@ -446,6 +656,23 @@ def session_state(bid: str):
     if not bookmarks.get_bookmark(bid):
         raise HTTPException(404, "书签不存在")
     return {"state": pool.link_state(bid)}
+
+
+@app.get("/api/settings")
+def get_settings():
+    """设置面板：可调项 + 当前值。"""
+    return {"fields": settings.FIELDS, "values": settings.values()}
+
+
+@app.put("/api/settings")
+def put_settings(patch: dict):
+    """保存设置：校验通过才写盘并立即生效。"""
+    try:
+        return {"values": settings.update(patch)}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except OSError as e:
+        raise HTTPException(500, f"写入设置失败: {e}")
 
 
 # SPA 回退：前端路由 /{hostname}/{path} 返回 index.html 交给前端 JS 接管。

@@ -74,36 +74,53 @@ def rename(session, old, new):
     return True
 
 
-def rmtree(session, path):
-    """递归删除（目录/文件）。用于空目录或文件删除。"""
+class DeleteCancelled(Exception):
+    """删除过程中被取消：当前条目没删完，已删掉的部分保留。"""
+
+
+def _delete_walk(session, path, stop):
+    """递归删掉 path，每删掉一项 yield (is_dir, size)。
+
+    用 lstat/listdir_attr 而不是 stat：符号链接按链接本身删除，不跟进去删目标。
+    每次 SFTP 往返单独拿锁，不占整棵树——删大目录期间列目录/改名等控制操作照常可用。
+    """
+    if stop is not None and stop.is_set():
+        raise DeleteCancelled()
     with session.lock:
         try:
-            st = session.client.stat(path)
+            st = session.client.lstat(path)
         except FileNotFoundError:
-            return False
-        if statmod.S_ISDIR(st.st_mode):
-            try:
-                session.client.rmdir(path)
-                return True
-            except OSError:
-                # 非空目录：逐项递归删
-                for entry in session.client.listdir(path):
-                    child = posixpath.join(path, entry)
-                    rmtree(session, child)
-                session.client.rmdir(path)
-                return True
-        else:
-            try:
-                session.client.remove(path)
-            except OSError:
-                # tar/符号链接等用 remove
-                session.client.remove(path)
-            return True
+            return
+    if not statmod.S_ISDIR(st.st_mode):
+        with session.lock:
+            session.client.remove(path)
+        yield False, st.st_size or 0
+        return
+    # 空目录一次 rmdir 就够；非空才去列
+    try:
+        with session.lock:
+            session.client.rmdir(path)
+        yield True, 0
+        return
+    except OSError:
+        pass
+    with session.lock:
+        children = list(session.client.listdir_attr(path))
+    for attr in children:
+        yield from _delete_walk(session, posixpath.join(path, attr.filename), stop)
+    with session.lock:
+        session.client.rmdir(path)
+    yield True, 0
+
+
+def delete_tree(session, path, stop=None):
+    """递归删除（文件或整棵目录），边删边 yield (is_dir, size) 供调用方报进度。"""
+    yield from _delete_walk(session, path, stop)
 
 
 def delete(session, path):
-    # paramiko 无递归删除，rstat 判断后递归处理
-    return rmtree(session, path)
+    """同步删除整项（不关心进度）；删掉了东西返回 True。"""
+    return sum(1 for _ in delete_tree(session, path)) > 0
 
 
 def stat(session, path):

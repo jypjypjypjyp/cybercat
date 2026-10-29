@@ -80,15 +80,16 @@ class ShellChannel:
 
 
 class SFTPSession:
-    """一条 SSH 连接 + 三条 SFTP 通道 + 空闲时间戳。
+    """一条 SSH 连接 + 两条常驻通道 + 预览并行通道 + 空闲时间戳。
 
     - 控制通道 self.client：目录/增删改，由 self.lock 串行化（都是短事务）。
     - 传输通道 transfer_client()：下载/上传，懒开，由 self.transfer_gate 串行化。
-    - 预览通道 preview_client()：图片/视频/音频/文本预览，懒开，由 self.preview_gate 串行化。
+    - 预览通道 open_preview_lane()：每次预览开 PREVIEW_LANES 条，读完即关；
+      预览之间由 self.preview_gate 串行化。
     - shell 通道 self.shell：只在 SFTP 列目录省略点文件时用（见 ShellChannel）。
 
-    三条通道各占一个 SFTP channel，互不等待：看着视频点下载也不会互相挡住。
-    paramiko 的 SFTPClient 单实例非线程安全，所以每条通道各自串行。
+    各通道互不等待：看着视频点下载也不会互相挡住。
+    paramiko 的 SFTPClient 单实例非线程安全，所以每条通道由单个线程使用。
     """
 
     def __init__(self, ssh):
@@ -100,7 +101,9 @@ class SFTPSession:
         self.transfer_gate = threading.Semaphore(1)
         self.preview_gate = threading.Semaphore(1)
         self._transfer = None
-        self._preview = None
+        # 远端 ffmpeg 路径（探测/上传一次后记住）
+        self.ffmpeg = None
+        self.ffmpeg_lock = threading.Lock()
         # 点文件兜底的三态：None 未判定 / True 服务器省略点文件（每次都补）/ False 不用补或补不了
         self.shell_dotfiles = None
         self.shell = ShellChannel(ssh)
@@ -115,15 +118,9 @@ class SFTPSession:
             self._transfer = self.ssh.open_sftp()
         return self._transfer
 
-    def preview_client(self):
-        """预览通道（懒开）。调用方须先持有 self.preview_gate。
-
-        单独一条通道的理由：预览视频时请求会持续挂着，若共用传输通道，
-        这段时间里下载/上传全部要排队等它。
-        """
-        if self._preview is None:
-            self._preview = self.ssh.open_sftp()
-        return self._preview
+    def open_preview_lane(self):
+        """预览并行读的一条独立通道；一次预览结束后由调用方关闭。"""
+        return self.ssh.open_sftp()
 
     def shell_names(self, path):
         """用常驻 shell 通道列目录里的名字（见 ShellChannel）；通道坏了返回 None。"""
@@ -135,7 +132,7 @@ class SFTPSession:
 
     def close(self):
         self.shell.close()
-        for c in (self._preview, self._transfer, self.client, self.ssh):
+        for c in (self._transfer, self.client, self.ssh):
             if c is None:
                 continue
             try:
